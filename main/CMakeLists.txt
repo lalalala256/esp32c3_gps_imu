@@ -11,7 +11,12 @@ idf_component_register(
         "keys.c"
         "logger_sd.c"
         "status.c"
+        "heartbeat.c"
+        "wifi_ap.c"
+        "web_server.c"
     INCLUDE_DIRS "."
+    EMBED_FILES
+        "web/index.html"
     REQUIRES
         esp_driver_gpio
         esp_driver_uart
@@ -20,4 +25,9 @@ idf_component_register(
         sdmmc
         fatfs
         esp_timer
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_http_server
+        nvs_flash
 )

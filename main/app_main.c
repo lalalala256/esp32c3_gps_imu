@@ -20,6 +20,7 @@
 #include "board_pins.h"
 #include "data_types.h"
 #include "gnss_uart.h"
+#include "heartbeat.h"
 #include "keys.h"
 #include "logger_sd.h"
 #include "log_format.h"
@@ -27,6 +28,8 @@
 #include "sensor_imu.h"
 #include "sensor_mag.h"
 #include "status.h"
+#include "web_server.h"
+#include "wifi_ap.h"
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
@@ -135,6 +138,10 @@ void app_main(void)
         ESP_LOGE(TAG, "gpio_install_isr_service failed: %s", esp_err_to_name(err));
     }
 
+    /* Just configures the GPIO; the self-test blinks run later in the LED task
+     * so they cannot delay the sensor bring-up below. */
+    heartbeat_init();
+
     const bool imu_ok = (sensor_imu_init() == ESP_OK);
     const bool mag_ok = (sensor_mag_init() == ESP_OK);
 
@@ -192,6 +199,22 @@ void app_main(void)
     keys_start_task();
     logger_start_task();
     status_start_task();
+    heartbeat_start_task();
+
+#if APP_WIFI_ENABLE
+    /* Started last on purpose: the acquisition pipeline is already running, and
+     * WiFi bring-up costs a second or two plus a sizeable slice of RAM. */
+    if (wifi_ap_start() == ESP_OK) {
+        ESP_LOGI(TAG, "browse the TF card at http://%s/", wifi_ap_ip_str());
+        if (web_server_start() != ESP_OK) {
+            ESP_LOGE(TAG, "web file browser failed to start");
+        }
+    } else {
+        ESP_LOGE(TAG, "WiFi access point failed to start");
+    }
+#else
+    ESP_LOGI(TAG, "WiFi access point and web UI disabled in menuconfig");
+#endif
 
     ESP_LOGI(TAG, "acquisition running");
 }

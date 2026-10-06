@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>esp32c3-supermini-gnss &middot; TF card</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 1rem;
+         background: #101418; color: #e6edf3; }
+  h1 { font-size: 1.05rem; margin: 0 0 .2rem; }
+  h2 { font-size: .9rem; margin: 1.2rem 0 .4rem; color: #9db4c8; font-weight: 600; }
+  .sub { color: #8b98a5; font-size: .78rem; margin-bottom: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: .35rem .45rem; border-bottom: 1px solid #232a31; text-align: left;
+           font-size: .82rem; vertical-align: middle; }
+  th { color: #7fb3d5; font-weight: 600; }
+  td.num { text-align: right; white-space: nowrap; color: #a8b8c8; }
+  button { background: #1d242b; color: #dbe6f0; border: 1px solid #33404c;
+           border-radius: 5px; padding: .22rem .5rem; font-size: .76rem; cursor: pointer; }
+  button:hover { background: #263039; }
+  button.pri { border-color: #2f6f9f; color: #9fd0f0; }
+  pre { background: #05080b; border: 1px solid #232a31; border-radius: 6px;
+        padding: .6rem; overflow: auto; max-height: 62vh; font-size: .72rem;
+        line-height: 1.35; white-space: pre; }
+  .warn { color: #ffb86b; }
+  .err { color: #ff7b72; }
+</style>
+</head>
+<body>
+
+<h1>TF card browser</h1>
+<div class="sub" id="status">loading&hellip;</div>
+
+<table>
+  <thead><tr><th>file</th><th class="num">size</th><th></th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<h2>Preview <span class="sub" id="pvname"></span></h2>
+<pre id="preview">Pick "head" or "tail" on a file above.</pre>
+
+<script>
+function human(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(1) + " KiB";
+  return (n / 1048576).toFixed(2) + " MiB";
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+
+var lastNames = [];
+
+function refresh() {
+  fetch("/files", { cache: "no-store" })
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      var el = document.getElementById("status");
+      if (j.error) {
+        el.className = "sub err";
+        el.textContent = j.error;
+        return;
+      }
+      el.className = "sub";
+      el.textContent = j.files.length + " file(s) in " + j.mount +
+                       " \u2014 logging " + (j.logging ? "ON" : "PAUSED");
+
+      var tb = document.getElementById("rows");
+      var names = j.files.map(function (f) { return f.name; }).join(",");
+      if (names === lastNames) return;   /* avoid clobbering scroll/selection */
+      lastNames = names;
+      tb.innerHTML = "";
+      j.files.forEach(function (f) {
+        var tr = document.createElement("tr");
+        tr.innerHTML =
+          "<td>" + esc(f.name) + "</td>" +
+          "<td class='num'>" + human(f.size) + "</td>" +
+          "<td><button class='pri' data-a='dl' data-f=\"" + esc(f.name) + "\">download</button> " +
+          "<button data-a='head' data-f=\"" + esc(f.name) + "\">head</button> " +
+          "<button data-a='tail' data-f=\"" + esc(f.name) + "\">tail</button></td>";
+        tb.appendChild(tr);
+      });
+      tb.querySelectorAll("button[data-f]").forEach(function (b) {
+        b.onclick = function () { act(b.getAttribute("data-a"), b.getAttribute("data-f")); };
+      });
+    })
+    .catch(function (e) {
+      var el = document.getElementById("status");
+      el.className = "sub err";
+      el.textContent = "cannot reach the device: " + e;
+    });
+}
+
+function act(what, name) {
+  if (what === "dl") {
+    location.href = "/download?f=" + encodeURIComponent(name);
+    return;
+  }
+  var pre = document.getElementById("preview");
+  document.getElementById("pvname").textContent = name;
+  pre.textContent = "loading\u2026";
+  fetch("/preview?f=" + encodeURIComponent(name) + "&tail=" + (what === "tail" ? 1 : 0),
+        { cache: "no-store" })
+    .then(function (r) { return r.text(); })
+    .then(function (t) { pre.textContent = t; pre.scrollTop = pre.scrollHeight; })
+    .catch(function (e) { pre.textContent = "error: " + e; });
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

@@ -137,7 +137,8 @@ static void imu_task(void *arg)
         if (use_int1) {
             if (xQueueReceive(s_drdy_q, &ts, pdMS_TO_TICKS(IMU_DRDY_TIMEOUT_MS)) != pdTRUE) {
                 ESP_LOGW(TAG, "no INT1 data-ready for %d ms, falling back to polling; "
-                         "check the BMI160 INT1 -> GPIO%d wiring",
+                         "the BMI160 side is configured correctly, so check the "
+                         "INT1 -> GPIO%d connection (or set the INT1 option off)",
                          IMU_DRDY_TIMEOUT_MS, PIN_BMI160_INT1);
                 use_int1 = false;
                 last_wake = xTaskGetTickCount();
@@ -198,10 +199,15 @@ static void imu_dump_int_registers(void)
     bmi160_read_reg(&s_dev, BMI160_INT_MAP_1, &map1);
     bmi160_read_reg(&s_dev, BMI160_STATUS, &st);
 
-    ESP_LOGI(TAG, "regs: PMU_STATUS=0x%02X (acc=%u gyr=%u, 1=normal) "
+    /* PMU_STATUS layout used by the driver: acc = bits[5:4], gyr = bits[3:2],
+     * mag = bits[1:0]; 1 means normal for accel/gyro. */
+    ESP_LOGI(TAG, "regs: PMU_STATUS=0x%02X (acc=%u gyr=%u mag=%u, 1=normal) "
              "INT_OUT_CTRL=0x%02X INT_EN_1=0x%02X INT_MAP_1=0x%02X "
              "STATUS=0x%02X (drdy_acc=%u drdy_gyr=%u)",
-             pmu, (unsigned)((pmu >> 2) & 3u), (unsigned)(pmu & 3u),
+             pmu,
+             (unsigned)((pmu & 0x30u) >> 4),
+             (unsigned)((pmu & 0x0Cu) >> 2),
+             (unsigned)(pmu & 0x03u),
              out, en1, map1, st,
              (unsigned)((st >> 7) & 1u), (unsigned)((st >> 6) & 1u));
 }

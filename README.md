@@ -5,6 +5,7 @@ ESP32-C3 SuperMini 采集固件：同时采集 **GNSS / BMI160(加计+陀螺) / 
 目标是为后续**组合导航（INS/GNSS 融合）**提供干净、带时间戳、无丢帧的原始数据。
 
 本版本**只做采集**，不包含姿态解算 / EKF / 融合算法。
+另带一个 **WiFi 网页文件浏览**（自带 SoftAP，见第 6 节），方便在手机上查看和下载 TF 卡里的数据。
 
 ---
 
@@ -140,7 +141,44 @@ GNSS 行额外给出绝对 UTC（`utc_date` / `utc_time`），用于把 `t_us` �
 
 ---
 
-## 6. 配置项（`idf.py menuconfig` → *GPS/IMU acquisition*）
+## 6. WiFi 网页文件浏览
+
+板子自带一个 SoftAP + 网页文件浏览器，**不需要路由器**。
+
+| 项 | 值 |
+|---|---|
+| SSID | `esp32c3-supermini-gnss` |
+| 密码 | `12345678`（WPA2-PSK） |
+| 信道 | 1（2.4 GHz；ESP32-C3 不支持 5 GHz） |
+| 发射功率 | 20 dBm（`APP_WIFI_TX_POWER_DBM`） |
+| 地址 | <http://192.168.4.1/> |
+
+用法：手机或电脑连上该 WiFi → 浏览器打开 <http://192.168.4.1/> → 列出 TF 卡里的文件，
+每行有 **download / head / tail** 三个按钮：
+
+- `download`：下载整个文件；
+- `head`：预览前 200 行；
+- `tail`：预览**最后** 200 行 —— 看正在写入的日志最实用。
+
+页面每 5 秒自动刷新文件列表。预览行数由 `APP_WEB_PREVIEW_LINES` 控制。
+
+HTTP 接口（页面是自包含的，无外部依赖）：
+
+| 接口 | 说明 |
+|---|---|
+| `GET /` | 单页界面 |
+| `GET /files` | JSON：`{mount, logging, files:[{name,size}]}` |
+| `GET /download?f=NAME` | 下载原文件 |
+| `GET /preview?f=NAME&tail=0\|1` | 预览前/后 N 行（`text/plain`） |
+
+> 安全与并发：
+> - 文件名白名单校验（禁止 `/`、`\`、`..`），只能访问挂载点根下的**普通文件**；
+> - 网页与采集线程共享一把 SD 锁，但**读文件与写 socket 分离**，
+>   慢速客户端不会拖慢 100 Hz 采集；
+> - WiFi 会带来额外功耗与少量时序抖动；要最干净的数据可在 menuconfig 里关掉
+>   `APP_WIFI_ENABLE`。
+
+## 7. 配置项（`idf.py menuconfig` → *GPS/IMU acquisition*）
 
 | 选项 | 默认 | 说明 |
 |---|---|---|
@@ -158,13 +196,22 @@ GNSS 行额外给出绝对 UTC（`utc_date` / `utc_time`），用于把 `t_us` �
 | `APP_SERIAL_MIRROR_DECIM` | 10 | 串口只镜像每 N 条 IMU/磁行（保护采集链路） |
 | `APP_LOG_AUTOSTART` | y | 上电即开始记录 |
 | `APP_LOG_FLUSH_MS` | 1000 | 落盘间隔 |
-| `APP_SD_SPI_FREQ_KHZ` | 20000 | TF 卡 SPI 时钟 |
+| `APP_SD_SPI_FREQ_KHZ` | 10000 | TF 卡 SPI 时钟（失败会自动降到 4M/400k） |
+| `APP_SD_RETRY_MS` | 10000 | 未挂载时每 N ms 自动重试挂载（0 = 关闭）；每次重试都会做一次原始 SPI 握手，便于示波器触发 |
 | `APP_KEY_DEBOUNCE_MS` | 30 | 按键消抖 |
 | `APP_STATUS_PERIOD_S` | 5 | 状态行周期 |
+| `APP_WIFI_ENABLE` | y | SoftAP + 网页文件浏览总开关 |
+| `APP_WIFI_SSID` | `esp32c3-supermini-gnss` | SoftAP 名称 |
+| `APP_WIFI_PASSWORD` | `12345678` | 8~63 字符；留空为开放网络 |
+| `APP_WIFI_CHANNEL` | 1 | WiFi 信道（1 最兼容；扫不到时可试 1/6/11） |
+| `APP_WIFI_TX_POWER_DBM` | 20 | 最大发射功率；SuperMini 天线小，默认拉满；欠压重启时调低 |
+| `APP_WIFI_MAX_STA` | 4 | 最大客户端数 |
+| `APP_WEB_PORT` | 80 | HTTP 端口 |
+| `APP_WEB_PREVIEW_LINES` | 200 | 预览行数 |
 
 ---
 
-## 7. 启动日志与状态行
+## 8. 启动日志与状态行
 
 启动时会打印接线清单、传感器检测结果（BMI160 chip id 应为 `0xD1`，
 QMC5883L chip id 应为 `0xFF`）、TF 卡挂载与本次 run 索引。
@@ -180,21 +227,24 @@ pps=125 iv=1000000us jit=12us rows=12500/12500/125/3 bytes=1048576 err=0 rst=0 d
 
 ---
 
-## 8. 排查
+## 9. 排查
 
 | 现象 | 处理 |
 |---|---|
 | `BMI160 not found` / `QMC5883L not found` | 查 I2C 接线与上拉；GPIO8 若接了板载 RGB 灯会干扰 SDA；确认 BMI160 的 SDO 接法对应 0x68/0x69 |
 | 板子反复重启 / 进不了下载模式 | GPIO2/8/9 上电必须为高：别按住 KEY1/BOOT，确认上拉到位 |
 | 串口无输出 | 确认控制台是 USB Serial/JTAG，且连的是 USB-C（不是 UART 脚） |
-| `TF card mount failed` | 卡座/引脚、卡是否 FAT32 格式化；固件会降级为「仅串口」继续采集 |
+| `TF card mount failed` | 固件会用 10M/4M/400k 三档速率自动重试；三档全失败则是电气问题 |
+| `sdmmc_card_init failed (0x107)` | 0x107 = 超时，发生在文件系统之前，**与是否 FAT32 无关**：优先查 MISO/MOSI 是否接反、卡是否插紧、模块 3.3V 供电、CS(GPIO7) 是否接上，以及 MISO/CS 是否缺上拉 |
 | GNSS 无数据 | 波特率（默认 9600）、TX/RX 是否交叉、天线是否在室外 |
 | `fix=0` 但 `pps` 在跳 | 未定位，属正常；`gnss.csv` 会出现 PPS-only 行 |
 | `drop` 持续增长 | 换更快的 SD 卡或调低 ODR |
+| 连上 WiFi 打不开网页 | 确认设备已广播 `esp32c3-supermini-gnss`；手机需关闭移动数据；地址是 `http://192.168.4.1/`（不是 https） |
+| 网页显示 `TF card is not mounted` | TF 卡未挂载，按上面 `TF card mount failed` 排查 |
 
 ---
 
-## 9. 后续标定（预留钩子）
+## 10. 后续标定（预留钩子）
 
 磁力计的**硬铁/软铁标定**目前是恒等变换，位置在
 `sensor_mag.c` 的 `MAG_HARD_IRON[3]` 与 `MAG_SOFT_IRON[3][3]`。
@@ -204,7 +254,7 @@ IMU 零偏标定可调用驱动自带的 `bmi160_calibrate()`（需设备静止�
 
 ---
 
-## 10. 目录结构
+## 11. 目录结构
 
 ```
 main/
@@ -222,8 +272,12 @@ main/
   logger_sd.c       SD 挂载 / run 索引 / 缓冲落盘 / 串口镜像 / 掉卡重挂
   log_format.c      纯 CSV 格式化函数（可在主机上单测）
   status.c          周期状态行
+  wifi_ap.c         WiFi SoftAP（NVS/netif/事件循环自理）
+  web_server.c      HTTP 文件浏览：list / download / preview（含路径白名单）
+  web/index.html    内嵌的单页前端（EMBED_FILES，无外部依赖）
 tools/
   check_logs.py     主机端日志校验（列数 / t_us 单调 / 速率 / 丢点概览）
+partitions.csv      3 MB 应用分区（默认 1 MB 装不下 WiFi + HTTP 服务）
 ```
 
 ### 设计取舍

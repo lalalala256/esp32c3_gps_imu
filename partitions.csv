@@ -1,0 +1,10 @@
+# Partition table for the ESP32-C3 SuperMini (4 MB flash).
+#
+# The default single-app layout only allows a 1 MB application, which WiFi plus
+# the HTTP server nearly fills. A 3 MB factory partition leaves plenty of room
+# for the sensor, logging and web code to grow.
+#
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+phy_init,   data, phy,     0xf000,   0x1000,
+factory,    app,  factory, 0x10000,  0x300000,

@@ -16,6 +16,7 @@
 #include "data_types.h"
 
 #include "driver/gpio.h"
+#include "driver/i2c_master.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -134,6 +135,8 @@ esp_err_t sensor_mag_init(void)
 {
     esp_err_t err;
 
+    /* Creates the I2C bus (and its mutex) but performs no I2C traffic, so a
+     * missing device produces no NACK noise here. */
     err = qmc5883l_init_desc(&s_dev, APP_QMC5883L_I2C_ADDR,
                              (i2c_port_t)APP_I2C_PORT_NUM,
                              PIN_I2C_SDA, PIN_I2C_SCL);
@@ -145,24 +148,40 @@ esp_err_t sensor_mag_init(void)
     /* Keep the shared bus at the same speed as the BMI160. */
     s_dev.i2c_dev.cfg.master.clk_speed = APP_I2C_FREQ_HZ;
 
-    /* Probe a few times: a module that has just been powered up can need a
-     * moment, and one NACK should not cost us the whole magnetometer stream. */
+    /*
+     * Look for an ACK before involving the driver. i2c_master_probe() suppresses
+     * NACK logging, so an absent module costs exactly one clear message instead
+     * of a pile of failed transactions from both the driver and i2cdev's retry
+     * logic.
+     */
+    void *bus = NULL;
+    if (i2cdev_get_shared_handle((i2c_port_t)APP_I2C_PORT_NUM, &bus) == ESP_OK && bus) {
+        if (i2c_master_probe((i2c_master_bus_handle_t)bus, APP_QMC5883L_I2C_ADDR,
+                             APP_I2C_SCAN_TIMEOUT_MS) != ESP_OK) {
+            ESP_LOGE(TAG, "QMC5883L does not ACK at 0x%02X, no device on the bus",
+                     APP_QMC5883L_I2C_ADDR);
+            return ESP_ERR_NOT_FOUND;
+        }
+    }
+
+    /* Presence is confirmed, so a single read suffices; keep one retry in case
+     * the very first transaction is disturbed. */
     uint8_t id = 0;
-    for (int attempt = 1; attempt <= 3; attempt++) {
+    for (int attempt = 1; attempt <= 2; attempt++) {
         id = 0;
         err = qmc5883l_get_chip_id(&s_dev, &id);
         if (err == ESP_OK && id == 0xFF) {
             break;
         }
-        ESP_LOGW(TAG, "QMC5883L probe %d/3 failed (id 0x%02X, %s)",
+        ESP_LOGW(TAG, "QMC5883L chip id read %d/2 failed (id 0x%02X, %s)",
                  attempt, id, esp_err_to_name(err));
-        if (attempt < 3) {
-            vTaskDelay(pdMS_TO_TICKS(100));
+        if (attempt < 2) {
+            vTaskDelay(pdMS_TO_TICKS(20));
         }
     }
     if (err != ESP_OK || id != 0xFF) {
-        ESP_LOGE(TAG, "QMC5883L not found at 0x%02X (chip id 0x%02X, %s)",
-                 APP_QMC5883L_I2C_ADDR, id, esp_err_to_name(err));
+        ESP_LOGE(TAG, "QMC5883L ACKed but reported chip id 0x%02X (expected 0xFF), %s",
+                 id, esp_err_to_name(err));
         return ESP_ERR_NOT_FOUND;
     }
     ESP_LOGI(TAG, "QMC5883L detected (chip id 0x%02X)", id);

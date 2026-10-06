@@ -33,12 +33,54 @@ menu "GPS/IMU acquisition"
     config APP_SD_SPI_FREQ_KHZ
         int "TF card SPI clock (kHz)"
         range 400 20000
-        default 20000
+        default 10000
+        help
+            The mount is retried at 4 MHz and 400 kHz if this clock fails, so
+            a lower default is not required, but 10 MHz is more tolerant of
+            jumper wires and modules without pull-ups than 20 MHz.
+
+    config APP_SD_RETRY_MS
+        int "Retry mounting the TF card every N ms while unmounted (0 = off)"
+        range 0 600000
+        default 2000
+        help
+            Keeps re-attempting the mount, so a card inserted after boot is
+            picked up without a reset. Each attempt also performs a short raw
+            SPI handshake, which is what you want to trigger a scope on while
+            chasing a wiring fault. Background retries are logged at debug
+            level so the 2 s default does not flood the console; the SPI
+            traffic itself continues either way.
 
     config APP_STATUS_PERIOD_S
         int "Periodic status line interval (s)"
         range 1 120
         default 5
+
+    menu "Status LED (GPIO8)"
+
+        config APP_LED_HEARTBEAT
+            bool "Blink the on-board LED to show the pipeline state"
+            default y
+            help
+                Gives a console-free indication of what the board is doing:
+                  solid on  - TF card mounted, CSV files open
+                  2 blinks  - the card answered the raw SPI probe but the
+                              mount still failed (marginal contact or supply)
+                  1 blink   - nothing on MISO at all (no card / no wiring)
+                Useful when the fault being chased is intermittent, because the
+                board can be left alone and powered from any source instead of
+                having a serial terminal (or a scope probe) attached to it.
+
+        choice APP_LED_ACTIVE_LEVEL
+            prompt "LED active level"
+            default APP_LED_ACTIVE_HIGH
+            config APP_LED_ACTIVE_LOW
+                bool "Active low (LED tied to 3V3)"
+            config APP_LED_ACTIVE_HIGH
+                bool "Active high (LED tied to GND)"
+        endchoice
+
+    endmenu
 
     config APP_KEY_DEBOUNCE_MS
         int "Key debounce time (ms)"
@@ -180,9 +222,58 @@ menu "GPS/IMU acquisition"
             range 0 1
             default 1
 
-        config APP_GNSS_RAW_DUMP
-            bool "Also record raw NMEA sentences to gnss.csv"
-            default n
+    endmenu
+
+    menu "WiFi access point and web file browser"
+
+        config APP_WIFI_ENABLE
+            bool "Start the WiFi access point and web file browser"
+            default y
+            help
+                Brings up a SoftAP and an HTTP server that lets you list,
+                download and preview the CSV files on the TF card. Disable it
+                for clean data-collection runs, since WiFi adds CPU load and
+                timing jitter.
+
+        config APP_WIFI_SSID
+            string "Access point SSID"
+            default "esp32c3-supermini-gnss"
+
+        config APP_WIFI_PASSWORD
+            string "Access point password (8..63 chars, empty for an open AP)"
+            default "12345678"
+
+        config APP_WIFI_CHANNEL
+            int "WiFi channel (1-13)"
+            range 1 13
+            default 1
+            help
+                Channel 1 is the lowest 2.4 GHz channel; it is a safe default
+                when a scanner has trouble seeing the network.
+
+        config APP_WIFI_TX_POWER_DBM
+            int "Maximum WiFi TX power (dBm)"
+            range 2 21
+            default 20
+            help
+                Set explicitly because a conservative default shortens the
+                usable range of the SuperMini's small ceramic antenna. Lower it
+                if the board browns out during WiFi transmits.
+
+        config APP_WIFI_MAX_STA
+            int "Maximum simultaneous clients"
+            range 1 8
+            default 4
+
+        config APP_WEB_PORT
+            int "HTTP port"
+            range 1 65535
+            default 80
+
+        config APP_WEB_PREVIEW_LINES
+            int "Lines returned by the in-browser preview"
+            range 10 2000
+            default 200
 
     endmenu
 

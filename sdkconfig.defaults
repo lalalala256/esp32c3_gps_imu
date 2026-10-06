@@ -18,3 +18,23 @@ CONFIG_I2CDEV_AUTO_ENABLE_PULLUPS=y
 
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
+
+# ---------------------------------------------------------------------------
+# The SuperMini carries a 4 MB flash, but the ESP32-C3 default is 2 MB and the
+# default partition table allows only a 1 MB application. Enabling WiFi and the
+# HTTP file browser nearly fills that, so use the real flash size together with
+# a 3 MB factory partition (see partitions.csv).
+# ---------------------------------------------------------------------------
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ---------------------------------------------------------------------------
+# FATFS long file names. The CSV names are not valid 8.3 names: gnss_0001.csv
+# is a 9.3 name and events_0001.csv is 11.3, so without LFN every fopen() of
+# those two fails with FR_INVALID_NAME and the logger silently degrades to
+# serial-only (imu_ and mag_ are exactly 8.3 and work, which is what makes it
+# look like a formatting problem).
+# ---------------------------------------------------------------------------
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=64

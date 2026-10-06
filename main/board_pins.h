@@ -36,6 +36,12 @@
 #define PIN_KEY1            GPIO_NUM_2
 #define PIN_KEY2            GPIO_NUM_3
 
+/* ---- Status LED --------------------------------------------------------
+ * GPIO8 is a strapping pin (it must read HIGH at boot) and drives the
+ * on-board LED on most SuperMini clones. It is only reconfigured as an
+ * output after boot, so the strapping value has already been latched. */
+#define PIN_STATUS_LED      GPIO_NUM_8
+
 /* ---- GNSS ------------------------------------------------------------- */
 #define PIN_GNSS_PPS        GPIO_NUM_10
 #define PIN_GNSS_UART_TX    GPIO_NUM_21   /* ESP32 TX -> GNSS RX */

@@ -172,3 +172,10 @@
 
 #define APP_WEB_PORT                CONFIG_APP_WEB_PORT
 #define APP_WEB_PREVIEW_LINES       CONFIG_APP_WEB_PREVIEW_LINES
+
+/*
+ * How often the live view is pushed to the browser. 50 ms = 20 Hz, enough for a
+ * smooth attitude display while keeping the stream handler cheap on a
+ * single-core part (the HTTP server runs it in its own connection task).
+ */
+#define APP_WEB_STREAM_PERIOD_MS    50

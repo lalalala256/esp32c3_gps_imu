@@ -17,6 +17,54 @@ SemaphoreHandle_t g_gnss_mutex;
 gnss_sample_t     g_last_gnss;
 pps_stats_t       g_pps;
 
+SemaphoreHandle_t g_sensor_mutex;
+imu_sample_t      g_last_imu;
+mag_sample_t      g_last_mag;
+
+void app_state_set_imu(const imu_sample_t *in)
+{
+    if (!in || !g_sensor_mutex) {
+        return;
+    }
+    if (xSemaphoreTake(g_sensor_mutex, portMAX_DELAY) == pdTRUE) {
+        g_last_imu = *in;
+        xSemaphoreGive(g_sensor_mutex);
+    }
+}
+
+void app_state_set_mag(const mag_sample_t *in)
+{
+    if (!in || !g_sensor_mutex) {
+        return;
+    }
+    if (xSemaphoreTake(g_sensor_mutex, portMAX_DELAY) == pdTRUE) {
+        g_last_mag = *in;
+        xSemaphoreGive(g_sensor_mutex);
+    }
+}
+
+void app_state_get_sensors(imu_sample_t *imu_out, mag_sample_t *mag_out)
+{
+    if (!g_sensor_mutex) {
+        if (imu_out) {
+            *imu_out = g_last_imu;
+        }
+        if (mag_out) {
+            *mag_out = g_last_mag;
+        }
+        return;
+    }
+    if (xSemaphoreTake(g_sensor_mutex, portMAX_DELAY) == pdTRUE) {
+        if (imu_out) {
+            *imu_out = g_last_imu;
+        }
+        if (mag_out) {
+            *mag_out = g_last_mag;
+        }
+        xSemaphoreGive(g_sensor_mutex);
+    }
+}
+
 void app_state_get_gnss(gnss_sample_t *out, pps_stats_t *pps_out)
 {
     if (!g_gnss_mutex) {

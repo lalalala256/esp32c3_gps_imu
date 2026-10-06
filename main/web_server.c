@@ -1,30 +1,44 @@
 /*
- * web_server.c - TF card file browser: list, download and preview.
+ * web_server.c - TF card file browser and live attitude feed.
  *
  * Endpoints
  *   GET /                         embedded single-page UI
  *   GET /files                    JSON: { mount, logging, files:[{name,size}] }
  *   GET /download?f=NAME          raw file as an attachment
  *   GET /preview?f=NAME&tail=0|1  first / last APP_WEB_PREVIEW_LINES lines
+ *   GET /imu                      JSON: one sensor + GNSS snapshot
+ *   GET /stream                   text/event-stream, one snapshot every
+ *                                 APP_WEB_STREAM_PERIOD_MS
  *
  * Concurrency
  * -----------
  * The logger task and this server both touch the card. Every FATFS call is
  * wrapped in the shared recursive lock from logger_sd.h, but the lock is
  * released around socket writes: a slow client must never stall the 100 Hz
- * acquisition pipeline. Download therefore reads one chunk under the lock and
- * then sends it unlocked.
+ * acquisition pipeline. Download and preview therefore read one small chunk
+ * under the lock and then send it unlocked.
+ *
+ * RAM
+ * ---
+ * No handler's allocation scales with the size of the file it serves. The card
+ * holds gigabytes; the heap holds a couple of hundred kilobytes. Every transfer
+ * is streamed through a fixed small buffer.
  */
 #include "web_server.h"
 
 #include <dirent.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
 #include "app_config.h"
+#include "data_types.h"
 #include "logger_sd.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -41,7 +55,8 @@ extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
 
 #define SD_LOCK_TIMEOUT_MS   1000
 #define DOWNLOAD_CHUNK_BYTES 2048
-#define PREVIEW_MAX_BYTES    (64 * 1024)
+#define PREVIEW_CHUNK_BYTES  1024
+#define LIVE_JSON_BYTES      512
 #define MAX_NAME_LEN         64
 
 /* ------------------------------------------------------------------ helpers */
@@ -109,28 +124,97 @@ static bool get_name_arg(httpd_req_t *req, char *out, size_t out_len)
     return httpd_query_key_value(query, "f", out, out_len) == ESP_OK;
 }
 
-/* Byte length of the first `lines` lines of buf. */
-static size_t first_lines_len(const char *buf, size_t len, unsigned lines)
+/*
+ * Offset of the start of the last `lines` lines, found by walking backwards in
+ * small blocks. This is what allows a multi-megabyte log to be previewed
+ * without ever holding it in RAM; the alternative (read the whole window, then
+ * scan it) is what made large previews fail on allocation.
+ *
+ * Returns -1 when the card stops responding mid-scan.
+ */
+static long tail_start_offset(FILE *f, long fsize, unsigned lines,
+                              char *buf, size_t bufsz)
 {
+    long pos = fsize;
     unsigned seen = 0;
-    for (size_t i = 0; i < len; i++) {
-        if (buf[i] == '\n' && ++seen >= lines) {
-            return i + 1;
+
+    while (pos > 0) {
+        size_t want = bufsz;
+        if ((long)want > pos) {
+            want = (size_t)pos;      /* first block may be short */
+        }
+        pos -= (long)want;
+
+        if (!sd_fs_lock(SD_LOCK_TIMEOUT_MS)) {
+            return -1;
+        }
+        const bool seeked = (fseek(f, pos, SEEK_SET) == 0);
+        const size_t got = seeked ? fread(buf, 1, want, f) : 0;
+        sd_fs_unlock();
+
+        if (got != want) {
+            return -1;
+        }
+        /* Count newlines from the end of the block towards its start. */
+        for (size_t i = got; i > 0; i--) {
+            if (buf[i - 1] == '\n' && ++seen > lines) {
+                return pos + (long)i;
+            }
         }
     }
-    return len;
+    return 0;                        /* fewer than `lines` lines in the file */
 }
 
-/* Offset of the start of the last `lines` lines of buf (0 if there are fewer). */
-static size_t last_lines_offset(const char *buf, size_t len, unsigned lines)
+/*
+ * Send at most `max_lines` lines starting at `start`, one small chunk at a
+ * time. The card lock is taken per read and released before the socket write,
+ * exactly like h_download, so a slow client cannot stall the logger.
+ */
+static esp_err_t stream_lines(httpd_req_t *req, FILE *f, long start,
+                              unsigned max_lines, char *buf, size_t bufsz)
 {
+    if (!sd_fs_lock(SD_LOCK_TIMEOUT_MS)) {
+        return ESP_FAIL;
+    }
+    const bool seeked = (fseek(f, start, SEEK_SET) == 0);
+    sd_fs_unlock();
+    if (!seeked) {
+        return ESP_FAIL;
+    }
+
     unsigned seen = 0;
-    for (size_t i = len; i > 0; i--) {
-        if (buf[i - 1] == '\n' && ++seen > lines) {
-            return i;
+    esp_err_t err = ESP_OK;
+
+    for (;;) {
+        if (!sd_fs_lock(SD_LOCK_TIMEOUT_MS)) {
+            err = ESP_FAIL;
+            break;
+        }
+        const size_t got = fread(buf, 1, bufsz, f);
+        sd_fs_unlock();
+
+        if (got == 0) {
+            break;                   /* end of file */
+        }
+
+        size_t send = got;
+        for (size_t i = 0; i < got; i++) {
+            if (buf[i] == '\n' && ++seen >= max_lines) {
+                send = i + 1;        /* stop just past the last wanted line */
+                break;
+            }
+        }
+
+        err = httpd_resp_send_chunk(req, buf, send);
+        if (err != ESP_OK || send != got) {
+            break;
         }
     }
-    return 0;
+
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, NULL, 0);   /* terminate */
+    }
+    return err;
 }
 
 /* ----------------------------------------------------------------- handlers */
@@ -312,7 +396,7 @@ static esp_err_t h_preview(httpd_req_t *req)
         tail = (val[0] == '1');
     }
 
-    const unsigned lines = APP_WEB_PREVIEW_LINES;
+    const unsigned lines = APP_WEB_PREVIEW_LINES ? APP_WEB_PREVIEW_LINES : 1;
 
     if (!sd_fs_lock(SD_LOCK_TIMEOUT_MS)) {
         return send_unavailable(req, "TF card busy");
@@ -332,51 +416,174 @@ static esp_err_t h_preview(httpd_req_t *req)
     if (fsize < 0) {
         fsize = 0;
     }
-
-    size_t want = (size_t)fsize;
-    if (want > PREVIEW_MAX_BYTES) {
-        want = PREVIEW_MAX_BYTES;
-    }
-
-    char *buf = malloc(want + 1);
-    if (!buf) {
-        fclose(f);
-        sd_fs_unlock();
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
-    }
-
-    fseek(f, tail ? (fsize - (long)want) : 0, SEEK_SET);
-    size_t got = fread(buf, 1, want, f);
-    fclose(f);
     sd_fs_unlock();
 
-    size_t body_len;
-    if (tail) {
-        const size_t off = last_lines_offset(buf, got, lines);
-        if (off > 0) {
-            memmove(buf, buf + off, got - off);
-            body_len = got - off;
-        } else {
-            body_len = got;
-        }
-    } else {
-        body_len = first_lines_len(buf, got, lines);
+    /*
+     * One small fixed buffer, reused for the backward scan and for the forward
+     * send. The size of the file no longer influences how much RAM the request
+     * needs, which is the entire point. The previous version malloc'd up to
+     * 64 KiB in a single call; with only ~200 KiB of total heap on an ESP32-C3
+     * that failed for exactly the files worth previewing, and the user saw
+     * "out of memory" instead of a log.
+     */
+    char *buf = malloc(PREVIEW_CHUNK_BYTES);
+    if (!buf) {
+        sd_fs_lock(SD_LOCK_TIMEOUT_MS);
+        fclose(f);
+        sd_fs_unlock();
+        return send_unavailable(req, "out of memory");
     }
-    buf[body_len] = '\0';
 
-    char hdr[48];
-    snprintf(hdr, sizeof(hdr), "%s %u lines", tail ? "last" : "first", lines);
+    long start = 0;
+    if (tail) {
+        start = tail_start_offset(f, fsize, lines, buf, PREVIEW_CHUNK_BYTES);
+        if (start < 0) {
+            free(buf);
+            sd_fs_lock(SD_LOCK_TIMEOUT_MS);
+            fclose(f);
+            sd_fs_unlock();
+            return send_unavailable(req, "TF card read failed");
+        }
+    }
+
+    char hdr[56];
+    snprintf(hdr, sizeof(hdr), "%s %u lines of %ld", tail ? "last" : "first",
+             lines, fsize);
 
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "X-Preview", hdr);
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 
-    const esp_err_t err = httpd_resp_send(req, buf, (ssize_t)body_len);
+    const esp_err_t err = stream_lines(req, f, start, lines, buf, PREVIEW_CHUNK_BYTES);
+
     free(buf);
+    sd_fs_lock(SD_LOCK_TIMEOUT_MS);
+    fclose(f);
+    sd_fs_unlock();
     return err;
 }
 
 /* --------------------------------------------------------------------- API */
+
+/*
+ * Sanitise a float on its way into JSON.
+ *
+ * NaN and +/-inf are not representable in JSON and would make JSON.parse()
+ * throw in the browser, which looks exactly like "the page is broken" rather
+ * than like a sensor problem.
+ *
+ * The magnitude clamp is not cosmetic either: printf("%.4f") on a garbage float
+ * (a flaky I2C read can return anything) expands to ~40 digits. With six such
+ * numbers plus the lat/lon pair the object would overflow LIVE_JSON_BYTES and
+ * be served truncated, i.e. as invalid JSON. Bounding the magnitude bounds the
+ * worst-case length at ~450 bytes, which is why 512 is enough.
+ */
+static double json_num(double v)
+{
+    if (!isfinite(v)) {
+        return 0.0;
+    }
+    if (v > 1e9) {
+        return 1e9;
+    }
+    if (v < -1e9) {
+        return -1e9;
+    }
+    return v;
+}
+
+/*
+ * One JSON object with everything the live view needs. Shared by /imu (single
+ * snapshot) and /stream (repeated push) so the two can never drift apart.
+ */
+static int build_live_json(char *out, size_t out_len)
+{
+    imu_sample_t  imu;
+    mag_sample_t  mag;
+    gnss_sample_t g;
+    pps_stats_t   pps;
+
+    app_state_get_sensors(&imu, &mag);
+    app_state_get_gnss(&g, &pps);
+
+    const int n = snprintf(
+        out, out_len,
+        "{\"t\":%lld,\"imu_ok\":%s,"
+        "\"ax\":%.4f,\"ay\":%.4f,\"az\":%.4f,"
+        "\"gx\":%.3f,\"gy\":%.3f,\"gz\":%.3f,"
+        "\"mag_ok\":%s,\"mx\":%.2f,\"my\":%.2f,\"mz\":%.2f,"
+        "\"fix\":%u,\"mode\":%u,\"sats\":%u,\"hdop\":%.2f,"
+        "\"lat\":%.7f,\"lon\":%.7f,\"alt\":%.1f,"
+        "\"utc_valid\":%s,\"utc\":\"%04u-%02u-%02uT%02u:%02u:%02u.%03uZ\","
+        "\"pps\":%lu}",
+        (long long)imu.t_us,
+        imu.valid ? "true" : "false",
+        json_num(imu.ax), json_num(imu.ay), json_num(imu.az),
+        json_num(imu.gx), json_num(imu.gy), json_num(imu.gz),
+        mag.valid ? "true" : "false",
+        json_num(mag.mx), json_num(mag.my), json_num(mag.mz),
+        (unsigned)g.fix_type, (unsigned)g.fix_mode, (unsigned)g.sats,
+        json_num(g.hdop),
+        json_num(g.pos_valid ? g.lat_deg : 0.0),
+        json_num(g.pos_valid ? g.lon_deg : 0.0),
+        json_num(g.pos_valid ? g.alt_msl_m : 0.0f),
+        g.utc_valid ? "true" : "false",
+        (unsigned)g.year, (unsigned)g.month, (unsigned)g.day,
+        (unsigned)g.hour, (unsigned)g.minute, (unsigned)g.second,
+        (unsigned)g.millisecond,
+        (unsigned long)pps.seq);
+
+    return clamp_len(n, out_len);
+}
+
+static esp_err_t h_imu(httpd_req_t *req)
+{
+    char body[LIVE_JSON_BYTES];
+    const int n = build_live_json(body, sizeof(body));
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, body, n);
+}
+
+/*
+ * Server-sent events: the browser opens one EventSource and the device pushes a
+ * fresh snapshot every APP_WEB_STREAM_PERIOD_MS. SSE needs no handshake or
+ * framing code (unlike a WebSocket) and reconnects by itself after a page
+ * reload or a dropped connection.
+ *
+ * The loop exits as soon as a write fails, which is how a client that navigated
+ * away releases its socket.
+ */
+static esp_err_t h_stream(httpd_req_t *req)
+{
+    char json[LIVE_JSON_BYTES];
+    char body[LIVE_JSON_BYTES + 16];
+
+    httpd_resp_set_type(req, "text/event-stream");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-Accel-Buffering", "no");
+
+    const TickType_t period = pdMS_TO_TICKS(APP_WEB_STREAM_PERIOD_MS);
+
+    /* One priming comment so the browser fires onopen immediately instead of
+     * waiting for the first sample. */
+    if (httpd_resp_send_chunk(req, ": live\n\n", 8) != ESP_OK) {
+        return ESP_OK;
+    }
+
+    for (;;) {
+        build_live_json(json, sizeof(json));
+        const int n = clamp_len(snprintf(body, sizeof(body), "data: %s\n\n", json),
+                                sizeof(body));
+
+        if (httpd_resp_send_chunk(req, body, n) != ESP_OK) {
+            break;                  /* client went away */
+        }
+        vTaskDelay(period);
+    }
+    return ESP_OK;
+}
 
 esp_err_t web_server_start(void)
 {
@@ -391,6 +598,8 @@ esp_err_t web_server_start(void)
         { .uri = "/files",    .method = HTTP_GET, .handler = h_files,    .user_ctx = NULL },
         { .uri = "/download", .method = HTTP_GET, .handler = h_download, .user_ctx = NULL },
         { .uri = "/preview",  .method = HTTP_GET, .handler = h_preview,  .user_ctx = NULL },
+        { .uri = "/imu",      .method = HTTP_GET, .handler = h_imu,      .user_ctx = NULL },
+        { .uri = "/stream",   .method = HTTP_GET, .handler = h_stream,   .user_ctx = NULL },
     };
 
     httpd_handle_t server = NULL;
@@ -406,7 +615,7 @@ esp_err_t web_server_start(void)
         }
     }
 
-    ESP_LOGI(TAG, "file browser on port %d (/ , /files , /download , /preview)",
+    ESP_LOGI(TAG, "web UI on port %d (/ , /files , /download , /preview , /imu , /stream)",
              (int)APP_WEB_PORT);
     return ESP_OK;
 }

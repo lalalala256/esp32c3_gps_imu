@@ -178,6 +178,10 @@ static void imu_task(void *arg)
         } else {
             g_stats.imu_drops++;
         }
+
+        /* Publish the newest sample for the web live view. An uncontended mutex
+         * take/give at 100 Hz is nothing compared to the I2C read above. */
+        app_state_set_imu(&s);
     }
 }
 

@@ -134,5 +134,20 @@ void app_state_get_gnss(gnss_sample_t *out, pps_stats_t *pps_out);
 void app_state_set_gnss(const gnss_sample_t *in);
 void app_state_set_pps(const pps_stats_t *in);
 
+/*
+ * Latest raw sensor sample, for the web live view.
+ *
+ * Written by the IMU and magnetometer tasks, read by the HTTP handlers. It has
+ * its own mutex rather than sharing g_gnss_mutex so that a slow (or stalled)
+ * browser can never delay the GNSS path, which carries the timing information.
+ */
+extern SemaphoreHandle_t g_sensor_mutex;
+extern imu_sample_t      g_last_imu;
+extern mag_sample_t      g_last_mag;
+
+void app_state_set_imu(const imu_sample_t *in);
+void app_state_set_mag(const mag_sample_t *in);
+void app_state_get_sensors(imu_sample_t *imu_out, mag_sample_t *mag_out);
+
 /* Queue a log event; never blocks the caller (drops and counts on overflow). */
 void app_event_log(int64_t t_us, log_source_t src, log_event_t evt);

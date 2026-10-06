@@ -1,46 +1,125 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>esp32c3-gnss &middot; TF card</title>
+<title>esp32c3-gnss</title>
 <style>
   :root { color-scheme: dark; }
-  body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 1rem;
-         background: #101418; color: #e6edf3; }
-  h1 { font-size: 1.05rem; margin: 0 0 .2rem; }
-  h2 { font-size: .9rem; margin: 1.2rem 0 .4rem; color: #9db4c8; font-weight: 600; }
-  .sub { color: #8b98a5; font-size: .78rem; margin-bottom: .8rem; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0;
+         padding: .8rem; background: #101418; color: #e6edf3; }
+  h1 { font-size: 1rem; margin: 0 0 .7rem; display: flex; align-items: baseline;
+       gap: .6rem; flex-wrap: wrap; }
+  h2 { font-size: .84rem; margin: 1rem 0 .35rem; color: #9db4c8; font-weight: 600;
+       display: flex; align-items: center; gap: .5rem; }
+  .sub { color: #8b98a5; font-size: .76rem; }
+  .err { color: #ff7b72; }
+  .warn { color: #ffb86b; }
+  .ok { color: #56d364; }
+  nav { display: flex; gap: .4rem; margin-bottom: .8rem; }
+  nav button { background: #161b22; color: #c9d1d9; border: 1px solid #30363d;
+               border-radius: 6px; padding: .35rem .85rem; font-size: .82rem;
+               cursor: pointer; }
+  nav button.on { background: #1f6feb22; border-color: #1f6feb; color: #79c0ff; }
+  .live { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
+  .stage { flex: 2 1 360px; min-width: 300px; background: #05080b;
+           border: 1px solid #232a31; border-radius: 8px; overflow: hidden; }
+  canvas { display: block; width: 100%; }
+  .panel { flex: 1 1 250px; min-width: 230px; }
+  .grid { display: grid; grid-template-columns: auto 1fr; gap: .16rem .7rem;
+          font-size: .8rem; align-items: baseline; }
+  .grid .k { color: #8b98a5; white-space: nowrap; }
+  .grid .v { color: #e6edf3; font-variant-numeric: tabular-nums; }
+  .btn { background: #1d242b; color: #dbe6f0; border: 1px solid #33404c;
+         border-radius: 5px; padding: .2rem .55rem; font-size: .75rem; cursor: pointer; }
+  .btn:hover { background: #263039; }
   table { border-collapse: collapse; width: 100%; }
   th, td { padding: .35rem .45rem; border-bottom: 1px solid #232a31; text-align: left;
            font-size: .82rem; vertical-align: middle; }
   th { color: #7fb3d5; font-weight: 600; }
   td.num { text-align: right; white-space: nowrap; color: #a8b8c8; }
-  button { background: #1d242b; color: #dbe6f0; border: 1px solid #33404c;
-           border-radius: 5px; padding: .22rem .5rem; font-size: .76rem; cursor: pointer; }
-  button:hover { background: #263039; }
-  button.pri { border-color: #2f6f9f; color: #9fd0f0; }
+  table button { background: #1d242b; color: #dbe6f0; border: 1px solid #33404c;
+         border-radius: 5px; padding: .22rem .5rem; font-size: .76rem; cursor: pointer; }
+  table button:hover { background: #263039; }
+  table button.pri { border-color: #2f6f9f; color: #9fd0f0; }
   pre { background: #05080b; border: 1px solid #232a31; border-radius: 6px;
-        padding: .6rem; overflow: auto; max-height: 62vh; font-size: .72rem;
+        padding: .6rem; overflow: auto; max-height: 55vh; font-size: .72rem;
         line-height: 1.35; white-space: pre; }
-  .warn { color: #ffb86b; }
-  .err { color: #ff7b72; }
 </style>
 </head>
 <body>
 
-<h1>TF card browser</h1>
-<div class="sub" id="status">loading&hellip;</div>
+<h1>esp32c3-gnss <span class="sub" id="link">连接中&hellip;</span></h1>
 
-<table>
-  <thead><tr><th>file</th><th class="num">size</th><th></th></tr></thead>
-  <tbody id="rows"></tbody>
-</table>
+<nav>
+  <button class="on" data-tab="live">实时姿态</button>
+  <button data-tab="files">TF 卡文件</button>
+</nav>
 
-<h2>Preview <span class="sub" id="pvname"></span></h2>
-<pre id="preview">Pick "head" or "tail" on a file above.</pre>
+<section id="tab-live">
+  <div class="live">
+    <div class="stage"><canvas id="cv"></canvas></div>
+    <div class="panel">
+      <h2>姿态 <button class="btn" id="tare">归零 / 校准零偏</button></h2>
+      <div class="grid">
+        <span class="k">roll 横滚</span><span class="v" id="v-roll">&ndash;</span>
+        <span class="k">pitch 俯仰</span><span class="v" id="v-pitch">&ndash;</span>
+        <span class="k">yaw 航向</span><span class="v" id="v-yaw">&ndash;</span>
+      </div>
+      <h2>加速度</h2>
+      <div class="grid">
+        <span class="k">ax</span><span class="v" id="v-ax">&ndash;</span>
+        <span class="k">ay</span><span class="v" id="v-ay">&ndash;</span>
+        <span class="k">az</span><span class="v" id="v-az">&ndash;</span>
+        <span class="k">|a|</span><span class="v" id="v-amag">&ndash;</span>
+      </div>
+      <h2>角速度</h2>
+      <div class="grid">
+        <span class="k">gx</span><span class="v" id="v-gx">&ndash;</span>
+        <span class="k">gy</span><span class="v" id="v-gy">&ndash;</span>
+        <span class="k">gz</span><span class="v" id="v-gz">&ndash;</span>
+        <span class="k">零偏</span><span class="v" id="v-bias">&ndash;</span>
+      </div>
+      <h2>GNSS</h2>
+      <div class="grid">
+        <span class="k">位置</span><span class="v" id="v-pos">&ndash;</span>
+        <span class="k">高度</span><span class="v" id="v-alt">&ndash;</span>
+        <span class="k">卫星 / HDOP</span><span class="v" id="v-sats">&ndash;</span>
+        <span class="k">UTC</span><span class="v" id="v-utc">&ndash;</span>
+        <span class="k">PPS</span><span class="v" id="v-pps">&ndash;</span>
+      </div>
+      <p class="sub">
+        立方体表示板子的姿态：相机固定，立方体随板子转动。roll / pitch 由加速度计
+        观测的重力方向与陀螺仪积分互补滤波得到，yaw 只能靠陀螺仪积分 &mdash; 没有磁力计
+        （QMC5883L 未响应）时会缓慢漂移。页面打开时会自动归零一次，点“归零”可以重新
+        以当前姿态为 0&deg; 并重新估计陀螺零偏（请保持静止）。
+      </p>
+    </div>
+  </div>
+</section>
+
+<section id="tab-files" hidden>
+  <div class="sub" id="status">loading&hellip;</div>
+  <table>
+    <thead><tr><th>file</th><th class="num">size</th><th></th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <h2>Preview <span class="sub" id="pvname"></span></h2>
+  <pre id="preview">Pick &ldquo;head&rdquo; or &ldquo;tail&rdquo; on a file above.</pre>
+</section>
 
 <script>
+"use strict";
+
+/* ------------------------------------------------------------------ 小工具 */
+
+var D2R = Math.PI / 180;
+var R2D = 180 / Math.PI;
+
+function $(id) { return document.getElementById(id); }
+function txt(id, s) { $(id).textContent = s; }
+
 function human(n) {
   if (n < 1024) return n + " B";
   if (n < 1048576) return (n / 1024).toFixed(1) + " KiB";
@@ -53,13 +132,389 @@ function esc(s) {
   });
 }
 
-var lastNames = [];
+/* 把角度差折到 -180..180，避免在 +/-180 附近做互补滤波时“绕圈”。 */
+function wrap180(d) {
+  while (d > 180) { d -= 360; }
+  while (d < -180) { d += 360; }
+  return d;
+}
 
-function refresh() {
+/* --------------------------------------------------------------- 标签页切换 */
+
+var tab = "live";
+
+function showTab(name) {
+  tab = name;
+  var btns = document.querySelectorAll("nav button");
+  for (var i = 0; i < btns.length; i++) {
+    btns[i].className = (btns[i].getAttribute("data-tab") === name) ? "on" : "";
+  }
+  $("tab-live").hidden = (name !== "live");
+  $("tab-files").hidden = (name !== "files");
+  if (name === "files") { refreshFiles(); }
+  sizeCanvas();
+}
+
+document.querySelectorAll("nav button").forEach(function (b) {
+  b.onclick = function () { showTab(b.getAttribute("data-tab")); };
+});
+
+/* ------------------------------------------------------------------ 3D 显示 */
+
+/*
+ * 手写投影而不是引入 Three.js：这个接入点很可能没有外网，页面必须完全自包含
+ * （它被嵌在固件里）。立方体是凸体，按面心深度从远到近画就能正确遮挡，
+ * 不需要 z-buffer。
+ */
+var cv = $("cv");
+var ctx = cv.getContext("2d");
+var VW = 640, VH = 440;
+
+var CUBE_V = [
+  [-1, -1, -1], [1, -1, -1], [-1, 1, -1], [1, 1, -1],
+  [-1, -1,  1], [1, -1,  1], [-1, 1,  1], [1, 1,  1]
+];
+var CUBE_F = [
+  { i: [0, 1, 3, 2], n: [ 0,  0, -1], c: [ 45, 100, 150] },
+  { i: [4, 6, 7, 5], n: [ 0,  0,  1], c: [ 80, 150, 215] },
+  { i: [0, 4, 5, 1], n: [ 0, -1,  0], c: [ 55, 150,  85] },
+  { i: [2, 3, 7, 6], n: [ 0,  1,  0], c: [ 35, 110,  60] },
+  { i: [0, 2, 6, 4], n: [-1,  0,  0], c: [160,  80,  75] },
+  { i: [1, 5, 7, 3], n: [ 1,  0,  0], c: [210, 100,  90] }
+];
+var AXES = [
+  { v: [1.7, 0, 0], c: "#ff5f56", t: "X" },
+  { v: [0, 1.7, 0], c: "#27c93f", t: "Y" },
+  { v: [0, 0, 1.7], c: "#4d9fff", t: "Z" }
+];
+
+/*
+ * 固定视角：相机放在东南偏上（方位角 35°、仰角 22°），这样 roll / pitch / yaw
+ * 三个方向的变化都能看见。若把相机正对世界 +Z 轴，pitch 只会表现为前后压缩，
+ * 屏幕上几乎看不出变化。
+ *
+ * 屏幕基向量 r（向右）/ u（向上）由视轴 c 与世界天顶构造，投影本身仍然是最
+ * 简单的一步透视。
+ */
+var CAM_D = 6.2;
+
+function cross(a, b) {
+  return [a[1] * b[2] - a[2] * b[1],
+          a[2] * b[0] - a[0] * b[2],
+          a[0] * b[1] - a[1] * b[0]];
+}
+
+function nrm(v) {
+  var n = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) || 1;
+  return [v[0] / n, v[1] / n, v[2] / n];
+}
+
+function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+
+var VIEW = (function () {
+  var az = 35 * D2R, el = 22 * D2R;
+  var c = [Math.sin(az) * Math.cos(el), -Math.cos(az) * Math.cos(el), Math.sin(el)];
+  var f = [-c[0], -c[1], -c[2]];              /* 相机 -> 原点 */
+  var r = nrm(cross(f, [0, 0, 1]));           /* 屏幕向右 */
+  return { c: c, r: r, u: cross(r, f) };      /* 屏幕向上 */
+})();
+
+function sizeCanvas() {
+  var w = cv.clientWidth || 640;
+  var dpr = window.devicePixelRatio || 1;
+  VW = w;
+  VH = Math.max(230, Math.round(w * 0.66));
+  cv.width = Math.round(VW * dpr);
+  cv.height = Math.round(VH * dpr);
+  cv.style.height = VH + "px";
+  /* 之后所有绘图都用 CSS 像素坐标。 */
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function rotMat(r, p, y) {          /* Rz(yaw) * Ry(pitch) * Rx(roll) */
+  var cr = Math.cos(r), sr = Math.sin(r);
+  var cp = Math.cos(p), sp = Math.sin(p);
+  var cy = Math.cos(y), sy = Math.sin(y);
+  return [
+    [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+    [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+    [-sp,     cp * sr,                cp * cr]
+  ];
+}
+
+function mul(R, v) {
+  return [R[0][0] * v[0] + R[0][1] * v[1] + R[0][2] * v[2],
+          R[1][0] * v[0] + R[1][1] * v[1] + R[1][2] * v[2],
+          R[2][0] * v[0] + R[2][1] * v[1] + R[2][2] * v[2]];
+}
+
+function project(v) {
+  var z = Math.max(CAM_D - dot(v, VIEW.c), 0.4);   /* 到相机的距离 */
+  var s = Math.min(VW, VH) * 1.45 / z;
+  return { x: VW / 2 + dot(v, VIEW.r) * s, y: VH / 2 - dot(v, VIEW.u) * s, z: z };
+}
+
+function line3(a, b) {                            /* 画一条世界坐标里的线段 */
+  var pa = project(a), pb = project(b);
+  ctx.moveTo(pa.x, pa.y);
+  ctx.lineTo(pb.x, pb.y);
+}
+
+function shade(rgb, lum) {
+  return "rgb(" + Math.min(255, Math.round(rgb[0] * lum)) + "," +
+                  Math.min(255, Math.round(rgb[1] * lum)) + "," +
+                  Math.min(255, Math.round(rgb[2] * lum)) + ")";
+}
+
+var LIGHT = (function () {
+  var l = [0.45, 0.8, 0.5];
+  var n = Math.sqrt(l[0] * l[0] + l[1] * l[1] + l[2] * l[2]);
+  return [l[0] / n, l[1] / n, l[2] / n];
+})();
+
+function drawScene(rollDeg, pitchDeg, yawDeg) {
+  var R = rotMat(rollDeg * D2R, pitchDeg * D2R, yawDeg * D2R);
+
+  ctx.clearRect(0, 0, VW, VH);
+
+  /* 世界水平面（Z=0）上的参考十字：立方体转、它不动，用来看地平在哪边。 */
+  ctx.strokeStyle = "#1b232b";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  line3([-2.7, 0, 0], [2.7, 0, 0]);
+  line3([0, -2.7, 0], [0, 2.7, 0]);
+  ctx.stroke();
+
+  var pv = CUBE_V.map(function (v) { return project(mul(R, v)); });
+
+  var order = CUBE_F.map(function (f) {
+    var z = 0;
+    for (var k = 0; k < 4; k++) { z += pv[f.i[k]].z; }
+    return { f: f, z: z / 4 };
+  }).sort(function (a, b) { return b.z - a.z; });   /* 远的先画 */
+
+  order.forEach(function (o) {
+    var f = o.f;
+    var n = mul(R, f.n);
+    var lum = 0.35 + 0.65 * Math.max(0, n[0] * LIGHT[0] + n[1] * LIGHT[1] + n[2] * LIGHT[2]);
+
+    ctx.beginPath();
+    for (var k = 0; k < 4; k++) {
+      var p = pv[f.i[k]];
+      if (k === 0) { ctx.moveTo(p.x, p.y); } else { ctx.lineTo(p.x, p.y); }
+    }
+    ctx.closePath();
+    ctx.fillStyle = shade(f.c, lum);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,.5)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  });
+
+  /* 机体坐标轴画在立方体之上，方便看方向。 */
+  var o0 = project(mul(R, [0, 0, 0]));
+  ctx.font = "bold 13px system-ui, sans-serif";
+  AXES.forEach(function (a) {
+    var e = project(mul(R, a.v));
+    ctx.beginPath();
+    ctx.moveTo(o0.x, o0.y);
+    ctx.lineTo(e.x, e.y);
+    ctx.strokeStyle = a.c;
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    ctx.fillStyle = a.c;
+    ctx.fillText(a.t, e.x + 5, e.y - 4);
+  });
+}
+
+/* -------------------------------------------------------------- 姿态解算 */
+
+var roll = 0, pitch = 0, yaw = 0;      /* 原始角，单位度 */
+var offR = 0, offP = 0, offY = 0;      /* 归零偏移 */
+var tPrev = 0, zeroed = false;
+
+/*
+ * 陀螺零偏很重要：互补滤波的稳态误差 ≈ 零偏 / 修正系数，在本页的参数下就是
+ * “1 °/s 的零偏 = 1° 的 roll/pitch 偏差”。所以不能拿一段“随便什么”数据
+ * 去平均，必须确认那段时间设备真的是静止的（三个轴的极差都很小），否则就
+ * 丢掉重来。设备一直动的话就保持上一次的估计。
+ */
+var K_ACC = 0.05;                      /* 互补滤波里加速度计的权重 */
+var BIAS_N = 30, QUIET_P2P = 1.5;      /* 30 个样本 ≈ 1.5 s @20 Hz */
+var bias = [0, 0, 0], biasDone = false, biasWin = [];
+
+function biasStep(gx, gy, gz) {
+  if (biasDone) { return; }
+  biasWin.push([gx, gy, gz]);
+  if (biasWin.length < BIAS_N) { return; }
+
+  var quiet = true;
+  for (var a = 0; a < 3; a++) {
+    var mn = Infinity, mx = -Infinity;
+    for (var i = 0; i < BIAS_N; i++) {
+      if (biasWin[i][a] < mn) { mn = biasWin[i][a]; }
+      if (biasWin[i][a] > mx) { mx = biasWin[i][a]; }
+    }
+    if (mx - mn > QUIET_P2P) { quiet = false; }
+  }
+
+  if (quiet) {
+    var s0 = 0, s1 = 0, s2 = 0;
+    for (var i = 0; i < BIAS_N; i++) {
+      s0 += biasWin[i][0]; s1 += biasWin[i][1]; s2 += biasWin[i][2];
+    }
+    bias = [s0 / BIAS_N, s1 / BIAS_N, s2 / BIAS_N];
+    biasDone = true;
+  }
+  biasWin = [];                        /* 接受与否都开新窗口 */
+}
+
+function tare() {
+  offR = roll;
+  offP = pitch;
+  offY = yaw;
+  /* 重新估计零偏；在找到新的静止窗口之前先沿用旧的估计，避免数值跳变。 */
+  biasWin = [];
+  biasDone = false;
+}
+
+function attitude(im) {
+  var t = im.t / 1e6;
+  var dt = zeroed ? Math.min(Math.max(t - tPrev, 0.001), 0.4) : 0.05;
+  tPrev = t;
+
+  biasStep(im.gx, im.gy, im.gz);
+
+  var gx = im.gx - bias[0], gy = im.gy - bias[1], gz = im.gz - bias[2];
+
+  /* 加速度计看到的“上”方向 -> 绝对倾角。只有接近 1 g 时可信（否则设备在加速）。 */
+  var na = Math.sqrt(im.ax * im.ax + im.ay * im.ay + im.az * im.az);
+  var accTrust = (na > 0.4) && (na < 1.6);
+  var rollA  = Math.atan2(im.ay, im.az) * R2D;
+  var pitchA = Math.atan2(-im.ax, Math.sqrt(im.ay * im.ay + im.az * im.az)) * R2D;
+
+  if (!zeroed && accTrust) {
+    roll = rollA;
+    pitch = pitchA;
+    yaw = 0;
+    zeroed = true;
+    tare();
+  }
+
+  /* 互补滤波：陀螺仪跟得动、加速度计不漂。 */
+  roll  += gx * dt;
+  pitch += gy * dt;
+  yaw   += gz * dt;
+  if (accTrust) {
+    roll  += K_ACC * wrap180(rollA  - roll);
+    pitch += K_ACC * wrap180(pitchA - pitch);
+  }
+
+  roll  = wrap180(roll);
+  pitch = wrap180(pitch);
+  yaw   = wrap180(yaw);
+
+  return { r: wrap180(roll - offR), p: wrap180(pitch - offP), y: wrap180(yaw - offY), na: na };
+}
+
+/* ------------------------------------------------------------- 数据处理 */
+
+var msgCount = 0, msgRate = 0;
+
+function handleSample(im) {
+  if (!im || typeof im.ax !== "number") { return; }
+
+  msgCount++;
+  var now = Date.now();
+  if (!handleSample.t0) { handleSample.t0 = now; }
+  if (now - handleSample.t0 >= 1000) {
+    msgRate = msgCount * 1000 / (now - handleSample.t0);
+    msgCount = 0;
+    handleSample.t0 = now;
+    setLink(true);
+  }
+
+  var a = attitude(im);
+  drawScene(a.r, a.p, a.y);
+
+  txt("v-roll",  a.r.toFixed(1) + "\u00b0");
+  txt("v-pitch", a.p.toFixed(1) + "\u00b0");
+  txt("v-yaw",   a.y.toFixed(1) + "\u00b0");
+  txt("v-ax", im.ax.toFixed(3) + " g");
+  txt("v-ay", im.ay.toFixed(3) + " g");
+  txt("v-az", im.az.toFixed(3) + " g");
+  txt("v-amag", a.na.toFixed(3) + " g");
+  txt("v-gx", im.gx.toFixed(2) + " \u00b0/s");
+  txt("v-gy", im.gy.toFixed(2) + " \u00b0/s");
+  txt("v-gz", im.gz.toFixed(2) + " \u00b0/s");
+  txt("v-bias", bias[0].toFixed(2) + " / " + bias[1].toFixed(2) + " / " +
+                bias[2].toFixed(2) + " \u00b0/s" +
+                (biasDone ? "" : "  \u6821\u51c6\u4e2d\u2026\uff08\u8bf7\u4fdd\u6301\u9759\u6b62\uff09"));
+
+  if (im.fix > 0 || im.sats > 0) {
+    txt("v-pos", im.fix > 0 ? (im.lat.toFixed(6) + ", " + im.lon.toFixed(6))
+                            : "\u65e0\u5b9a\u4f4d\uff08\u6536\u5230 " + im.sats + " \u9897\u536b\u661f\uff09");
+    txt("v-alt", im.fix > 0 ? im.alt.toFixed(1) + " m" : "\u2013");
+    txt("v-sats", im.sats + " / " + im.hdop.toFixed(2) +
+                  "  (fix=" + im.fix + ", mode=" + im.mode + ")");
+    txt("v-utc", im.utc_valid ? im.utc : "\u672a\u5b9a\u65f6");
+  } else {
+    txt("v-pos", "\u672a\u5b9a\u4f4d");
+    txt("v-alt", "\u2013");
+    txt("v-sats", "\u2013");
+    txt("v-utc", "\u2013");
+  }
+  txt("v-pps", im.pps);
+}
+
+function setLink(ok) {
+  var el = $("link");
+  if (ok) {
+    el.className = "sub ok";
+    el.textContent = "\u5df2\u8fde\u63a5 \u00b7 " + msgRate.toFixed(1) + " Hz";
+  } else {
+    el.className = "sub warn";
+    el.textContent = "\u7b49\u5f85\u6570\u636e\u2026";
+  }
+}
+
+/* 先试 SSE（一条连接，设备主动推）；失败或不可用就退回轮询 /imu。 */
+var es = null, polls = null, errs = 0;
+
+function startPolling() {
+  if (es) { es.close(); es = null; }
+  if (polls) { return; }
+  setLink(false);
+  polls = setInterval(function () {
+    fetch("/imu", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(handleSample)
+      .catch(function () { setLink(false); });
+  }, 100);
+}
+
+function startStream() {
+  if (!window.EventSource) { startPolling(); return; }
+  errs = 0;
+  es = new EventSource("/stream");
+  es.onmessage = function (e) {
+    try { handleSample(JSON.parse(e.data)); } catch (x) { /* 半条消息，丢掉 */ }
+  };
+  es.onerror = function () {
+    setLink(false);
+    if (++errs >= 5) { startPolling(); }   /* 代理/浏览器不支持长连接 */
+  };
+}
+
+/* ------------------------------------------------------------ TF 卡浏览 */
+
+var lastNames = "";
+
+function refreshFiles() {
   fetch("/files", { cache: "no-store" })
     .then(function (r) { return r.json(); })
     .then(function (j) {
-      var el = document.getElementById("status");
+      var el = $("status");
       if (j.error) {
         el.className = "sub err";
         el.textContent = j.error;
@@ -69,9 +524,9 @@ function refresh() {
       el.textContent = j.files.length + " file(s) in " + j.mount +
                        " \u2014 logging " + (j.logging ? "ON" : "PAUSED");
 
-      var tb = document.getElementById("rows");
+      var tb = $("rows");
       var names = j.files.map(function (f) { return f.name; }).join(",");
-      if (names === lastNames) return;   /* avoid clobbering scroll/selection */
+      if (names === lastNames) { return; }   /* 别把滚动位置刷掉 */
       lastNames = names;
       tb.innerHTML = "";
       j.files.forEach(function (f) {
@@ -89,7 +544,7 @@ function refresh() {
       });
     })
     .catch(function (e) {
-      var el = document.getElementById("status");
+      var el = $("status");
       el.className = "sub err";
       el.textContent = "cannot reach the device: " + e;
     });
@@ -100,8 +555,8 @@ function act(what, name) {
     location.href = "/download?f=" + encodeURIComponent(name);
     return;
   }
-  var pre = document.getElementById("preview");
-  document.getElementById("pvname").textContent = name;
+  var pre = $("preview");
+  $("pvname").textContent = name;
   pre.textContent = "loading\u2026";
   fetch("/preview?f=" + encodeURIComponent(name) + "&tail=" + (what === "tail" ? 1 : 0),
         { cache: "no-store" })
@@ -110,8 +565,15 @@ function act(what, name) {
     .catch(function (e) { pre.textContent = "error: " + e; });
 }
 
-refresh();
-setInterval(refresh, 5000);
+/* --------------------------------------------------------------- 启动 */
+
+$("tare").onclick = tare;
+window.addEventListener("resize", sizeCanvas);
+
+sizeCanvas();
+drawScene(0, 0, 0);
+setInterval(refreshFiles, 5000);
+startStream();
 </script>
 </body>
 </html>

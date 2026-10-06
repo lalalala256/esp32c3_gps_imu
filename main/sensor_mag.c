@@ -123,6 +123,9 @@ static void mag_task(void *arg)
             } else {
                 g_stats.mag_drops++;
             }
+
+            /* Publish for the web live view (compass / heading display). */
+            app_state_set_mag(&s);
         }
 
         vTaskDelayUntil(&last_wake, period);

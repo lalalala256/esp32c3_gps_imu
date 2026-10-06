@@ -46,6 +46,7 @@ static const char *TAG = "app";
 static void create_shared_objects(void)
 {
     g_gnss_mutex = xSemaphoreCreateMutex();
+    g_sensor_mutex = xSemaphoreCreateMutex();
 
     q_imu  = xQueueCreate(APP_QUEUE_LEN_IMU,  sizeof(imu_sample_t));
     q_mag  = xQueueCreate(APP_QUEUE_LEN_MAG,  sizeof(mag_sample_t));
@@ -117,7 +118,7 @@ static unsigned i2c_bus_scan(void)
 void app_main(void)
 {
     create_shared_objects();
-    if (!g_gnss_mutex || !q_imu || !q_mag || !q_gnss || !q_key || !q_pps) {
+    if (!g_gnss_mutex || !g_sensor_mutex || !q_imu || !q_mag || !q_gnss || !q_key || !q_pps) {
         ESP_LOGE(TAG, "shared queue/mutex allocation failed, aborting");
         return;
     }

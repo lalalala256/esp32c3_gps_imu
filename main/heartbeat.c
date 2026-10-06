@@ -37,6 +37,9 @@ static const char *TAG = "led";
 #define LED_GAP_MS          180
 #define LED_SELFTEST_BLINKS 3
 
+/* Cleared when heartbeat_init() refuses the pin, so the task is not started. */
+static bool s_active;
+
 static void led_on(void)
 {
     gpio_set_level(PIN_STATUS_LED, APP_LED_ACTIVE_LEVEL);
@@ -65,6 +68,27 @@ esp_err_t heartbeat_init(void)
         return ESP_OK;
     }
 
+    /*
+     * The pins are the same, so this cannot work, and pretending otherwise is
+     * worse than saying so: once i2c_master creates the bus it points the pad's
+     * open-drain driver at the I2C peripheral signal
+     * (esp_rom_gpio_connect_out_signal), after which gpio_set_level() only
+     * writes GPIO.out and never reaches the pad again. The LED would sit frozen
+     * at whatever level it was left at, which is easy to misread as "the LED
+     * works but the pattern is wrong".
+     *
+     * This becomes a no-op as soon as the LED is moved to a free pin.
+     */
+    if ((int)PIN_STATUS_LED == (int)PIN_I2C_SDA ||
+        (int)PIN_STATUS_LED == (int)PIN_I2C_SCL) {
+        ESP_LOGW(TAG, "status LED is on GPIO%d, which is also I2C %s; the LED "
+                 "cannot be driven once the I2C bus is up, so the heartbeat is "
+                 "disabled (move the LED to a free pin to get it back)",
+                 PIN_STATUS_LED,
+                 ((int)PIN_STATUS_LED == (int)PIN_I2C_SDA) ? "SDA" : "SCL");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     const gpio_config_t cfg = {
         .pin_bit_mask = 1ULL << PIN_STATUS_LED,
         .mode         = GPIO_MODE_OUTPUT,
@@ -81,6 +105,7 @@ esp_err_t heartbeat_init(void)
     }
 
     led_off();
+    s_active = true;
 
     ESP_LOGI(TAG, "status LED on GPIO%d (%s active): solid=card mounted, "
              "2 blinks=card answers but mount fails, 1 blink=no card",
@@ -129,7 +154,7 @@ static void heartbeat_task(void *arg)
 
 void heartbeat_start_task(void)
 {
-    if (!APP_LED_HEARTBEAT) {
+    if (!APP_LED_HEARTBEAT || !s_active) {
         return;
     }
     xTaskCreate(heartbeat_task, "heartbeat", APP_STACK_LED, NULL, APP_PRIO_LED, NULL);

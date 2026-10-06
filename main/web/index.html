@@ -55,6 +55,7 @@
 <nav>
   <button class="on" data-tab="live">实时姿态</button>
   <button data-tab="files">TF 卡文件</button>
+  <button data-tab="i2c">I2C 诊断</button>
 </nav>
 
 <section id="tab-live">
@@ -109,6 +110,23 @@
   <pre id="preview">Pick &ldquo;head&rdquo; or &ldquo;tail&rdquo; on a file above.</pre>
 </section>
 
+<section id="tab-i2c" hidden>
+  <h2>I2C 总线扫描 <button class="btn" id="rescan">重新扫描</button></h2>
+  <pre id="i2c">切换到此标签页会自动扫描。</pre>
+  <p class="sub">
+    用途：拔掉/插上磁力计模块、换一组杜邦线之后，点“重新扫描”即可，不需要接串口
+    也不需要重新烧录。判断方法：<br>
+    · <b>只有 0x68</b>（BMI160）—— 磁力计这条支路完全没上总线：查它的 VCC/GND、
+    SDA/SCL 是否接反、杜邦线是否断、模块是否发烫/损坏。地址写错已排除。<br>
+    · <b>出现 0x1E / 0x2C / 0x0E</b> —— 模块是活的，只是不是 QMC5883L（克隆型号），
+    改地址即可。<br>
+    · <b>某条线显示 HELD low</b> —— 那条线被拉死了：短路或器件锁死。
+    拔下磁力计再看一次，就能分清是模块的问题还是线的问题。<br>
+    · 扫描始终只有 0x68 时，把磁力计<b>插到 BMI160 正在用的那组线上</b>
+    （证明是好线），再把 BMI160 插到磁力计的线上。哪一步消失，问题就在哪一段。
+  </p>
+</section>
+
 <script>
 "use strict";
 
@@ -151,7 +169,9 @@ function showTab(name) {
   }
   $("tab-live").hidden = (name !== "live");
   $("tab-files").hidden = (name !== "files");
+  $("tab-i2c").hidden = (name !== "i2c");
   if (name === "files") { refreshFiles(); }
+  if (name === "i2c") { scanI2c(); }
   sizeCanvas();
 }
 
@@ -565,9 +585,21 @@ function act(what, name) {
     .catch(function (e) { pre.textContent = "error: " + e; });
 }
 
+/* ------------------------------------------------------------ I2C 诊断 */
+
+function scanI2c() {
+  var pre = $("i2c");
+  pre.textContent = "\u626b\u63cf\u4e2d\u2026";
+  fetch("/i2c", { cache: "no-store" })
+    .then(function (r) { return r.text(); })
+    .then(function (t) { pre.textContent = t; })
+    .catch(function (e) { pre.textContent = "\u65e0\u6cd5\u8bbf\u95ee\u8bbe\u5907: " + e; });
+}
+
 /* --------------------------------------------------------------- 启动 */
 
 $("tare").onclick = tare;
+$("rescan").onclick = scanI2c;
 window.addEventListener("resize", sizeCanvas);
 
 sizeCanvas();

@@ -7,6 +7,7 @@ idf_component_register(
         "sensor_mag.c"
         "gnss_nmea.c"
         "gnss_uart.c"
+        "i2c_diag.c"
         "pps_capture.c"
         "keys.c"
         "logger_sd.c"

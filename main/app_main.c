@@ -21,6 +21,7 @@
 #include "data_types.h"
 #include "gnss_uart.h"
 #include "heartbeat.h"
+#include "i2c_diag.h"
 #include "keys.h"
 #include "logger_sd.h"
 #include "log_format.h"
@@ -76,42 +77,20 @@ static void log_banner(void)
 }
 
 /*
- * Probe every 7-bit I2C address and report what answers. This is the fastest
- * way to tell apart a missing magnetometer, a mis-wired one, and a clone module
- * (boards sold as QMC5883L are sometimes HMC5883L at 0x1E or QMC5883P at 0x2C).
- * i2cdev owns the bus, so we borrow its handle; i2c_master_probe() suppresses
- * the NACK logging, which keeps the scan quiet.
+ * Probe every 7-bit I2C address and report what answers, with a register dump
+ * for each so that a clone module can be identified. This is the fastest way to
+ * tell apart a missing magnetometer, a mis-wired one, and a board sold as a
+ * QMC5883L that is really an HMC5883L (0x1E) or a QMC5883P (0x2C).
+ *
+ * The full report goes to the console once at boot; /i2c serves the same report
+ * on demand, which is what makes rewiring testable without a reflash.
  */
 static unsigned i2c_bus_scan(void)
 {
-    void *bus = NULL;
-    if (i2cdev_get_shared_handle((i2c_port_t)APP_I2C_PORT_NUM, &bus) != ESP_OK || !bus) {
-        ESP_LOGW(TAG, "I2C scan skipped (bus not initialised)");
-        return 0;
-    }
+    static char report[1400];
 
-    char found[128];
-    size_t off = 0;
-    unsigned count = 0;
-    found[0] = '\0';
-
-    for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
-        if (i2c_master_probe((i2c_master_bus_handle_t)bus, addr,
-                             APP_I2C_SCAN_TIMEOUT_MS) != ESP_OK) {
-            continue;
-        }
-        count++;
-        if (off < sizeof(found) - 8) {
-            off += (size_t)snprintf(found + off, sizeof(found) - off, " 0x%02X", addr);
-        }
-    }
-
-    if (count) {
-        ESP_LOGI(TAG, "I2C scan: %u device(s) at%s", count, found);
-    } else {
-        ESP_LOGW(TAG, "I2C scan: no devices responded (check wiring and pull-ups)");
-    }
-
+    const unsigned count = i2c_diag_report(report, sizeof(report));
+    ESP_LOGI(TAG, "I2C scan report:\n%s", report);
     return count;
 }
 
@@ -124,6 +103,15 @@ void app_main(void)
     }
 
     log_banner();
+
+    /*
+     * Runs before i2cdev touches anything, while SDA/SCL are still ordinary
+     * GPIOs: this is the only moment the lines can be inspected without the I2C
+     * peripheral driving them, and the only moment a stuck bus can be made
+     * healthy again by hand. It is not fatal either way - the sensors that do
+     * work keep working.
+     */
+    i2c_diag_lines_pre_init();
 
     esp_err_t err = i2cdev_init();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {

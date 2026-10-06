@@ -35,6 +35,7 @@
 
 #include "app_config.h"
 #include "data_types.h"
+#include "i2c_diag.h"
 #include "logger_sd.h"
 
 #include "freertos/FreeRTOS.h"
@@ -547,6 +548,24 @@ static esp_err_t h_imu(httpd_req_t *req)
 }
 
 /*
+ * The I2C scan report, on demand.
+ *
+ * This is what makes physical debugging practical: unplug a module, plug it
+ * somewhere else, reload the page and scan again - no serial console, no
+ * reflash. It runs concurrently with the sensor tasks, which is safe because
+ * the i2c_master driver serialises transactions on the bus.
+ */
+static esp_err_t h_i2c(httpd_req_t *req)
+{
+    char report[1400];
+    i2c_diag_report(report, sizeof(report));
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_sendstr(req, report);
+}
+
+/*
  * Server-sent events: the browser opens one EventSource and the device pushes a
  * fresh snapshot every APP_WEB_STREAM_PERIOD_MS. SSE needs no handshake or
  * framing code (unlike a WebSocket) and reconnects by itself after a page
@@ -600,6 +619,7 @@ esp_err_t web_server_start(void)
         { .uri = "/preview",  .method = HTTP_GET, .handler = h_preview,  .user_ctx = NULL },
         { .uri = "/imu",      .method = HTTP_GET, .handler = h_imu,      .user_ctx = NULL },
         { .uri = "/stream",   .method = HTTP_GET, .handler = h_stream,   .user_ctx = NULL },
+        { .uri = "/i2c",      .method = HTTP_GET, .handler = h_i2c,      .user_ctx = NULL },
     };
 
     httpd_handle_t server = NULL;
@@ -615,7 +635,7 @@ esp_err_t web_server_start(void)
         }
     }
 
-    ESP_LOGI(TAG, "web UI on port %d (/ , /files , /download , /preview , /imu , /stream)",
+    ESP_LOGI(TAG, "web UI on port %d (/ , /files , /download , /preview , /imu , /stream , /i2c)",
              (int)APP_WEB_PORT);
     return ESP_OK;
 }

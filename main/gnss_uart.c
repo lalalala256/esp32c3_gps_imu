@@ -40,6 +40,29 @@ static const char *TAG = "gnss";
 
 static volatile bool s_ready;
 
+/*
+ * Receive-path diagnostics.
+ *
+ * A GPS module that is not wired, not powered, or transmitting at a different
+ * baud rate than we listen at all produce the same status line (zero epochs), so
+ * count the raw traffic and keep the first bytes of each reporting window. NMEA
+ * shows up as printable '$G...' text; a baud mismatch shows up as mojibake, and
+ * silence shows up as nothing at all.
+ */
+static uint32_t s_rx_window;
+static uint32_t s_lines_window;
+static uint32_t s_sent_window;
+static uint8_t  s_dump[APP_GNSS_REPORT_DUMP_BYTES];
+static size_t   s_dump_len;
+static int64_t  s_last_report_us;
+
+/* The first RMC of each window. Epochs are only produced by RMC, and RMC only
+ * produces one when its time field parses, so keeping the raw sentence is what
+ * says whether the receiver is sending no time (no fix) or something the parser
+ * cannot read. */
+static char     s_rmc[APP_GNSS_LINE_BYTES];
+static bool     s_have_rmc;
+
 /* ---------------------------------------------------------------- emitters */
 
 static void enqueue_gnss(const gnss_sample_t *s)
@@ -94,6 +117,32 @@ static void emit_pps_only(const pps_event_t *pending, int64_t *last_emit_us)
     s.pps_seq  = pending->seq;
 
     enqueue_gnss(&s);
+    *last_emit_us = s.t_us;
+}
+
+/*
+ * Status record: the receiver is alive and reporting, but has no UTC time yet
+ * because it has no fix. That is what a receiver with no sky view looks like.
+ *
+ * Logging it matters for two reasons. Without it the GNSS file simply stays
+ * empty until the first fix, so "has not acquired yet" and "the link is broken"
+ * look identical in the data. And the satellite count is then recorded over
+ * time, so moving the antenna somewhere useful is visible in the log itself.
+ *
+ * Unlike the PPS-only record this one *is* published as the latest GNSS state,
+ * so the status line shows a live satellite count; utc_valid and pos_valid are
+ * both forced to 0, which is how a consumer tells it from a fix.
+ */
+static void emit_status(const gnss_nmea_t *st, int64_t *last_emit_us)
+{
+    gnss_sample_t s;
+    gnss_nmea_snapshot(st, &s);
+    s.utc_valid = false;
+    s.pos_valid = false;
+    s.t_us = esp_timer_get_time();
+
+    enqueue_gnss(&s);
+    app_state_set_gnss(&s);
     *last_emit_us = s.t_us;
 }
 
@@ -158,14 +207,29 @@ static void gnss_task(void *arg)
         for (int i = 0; i < rd; i++) {
             const char c = (char)chunk[i];
 
+            if (s_dump_len < sizeof(s_dump)) {
+                s_dump[s_dump_len++] = chunk[i];
+            }
+
             if (c == '\n') {
                 if (!overflow && len > 0) {
                     line[len] = '\0';
+                    s_lines_window++;
                     if (line[0] == '$') {
-                        if (gnss_nmea_feed(&st, line) == GNSS_NMEA_EPOCH) {
+                        if (!s_have_rmc && strstr(line, "RMC") != NULL) {
+                            snprintf(s_rmc, sizeof(s_rmc), "%s", line);
+                            s_have_rmc = true;
+                        }
+                        const gnss_nmea_res_t res = gnss_nmea_feed(&st, line);
+                        if (res != GNSS_NMEA_INVALID) {
+                            s_sent_window++;
+                        }
+                        if (res == GNSS_NMEA_EPOCH) {
                             emit_epoch(&st, &pending, have_pending_pps,
                                        &last_emit_us);
                             have_pending_pps = false;
+                        } else if (res == GNSS_NMEA_STATUS) {
+                            emit_status(&st, &last_emit_us);
                         }
                     }
                 }
@@ -183,12 +247,52 @@ static void gnss_task(void *arg)
             }
         }
 
+        if (rd > 0) {
+            s_rx_window += (uint32_t)rd;
+        }
+
         /* 3. Without a fix there is no RMC epoch, so log the PPS timing on its
          *    own rather than losing it. */
         const int64_t now = esp_timer_get_time();
         if (have_pending_pps && (now - last_emit_us) > PPS_ONLY_TIMEOUT_US) {
             emit_pps_only(&pending, &last_emit_us);
             have_pending_pps = false;
+        }
+
+        /* 4. Receive-path report. */
+        if ((now - s_last_report_us) > (int64_t)APP_GNSS_REPORT_MS * 1000) {
+            s_last_report_us = now;
+
+            if (s_rx_window == 0) {
+                ESP_LOGW(TAG, "no data on UART%d for %d ms: check the GPS TX -> GPIO%d "
+                         "wire, that the module is powered, and that %d baud matches it",
+                         APP_GNSS_UART_PORT, APP_GNSS_REPORT_MS, PIN_GNSS_UART_RX,
+                         APP_GNSS_BAUD);
+            } else {
+                ESP_LOGW(TAG, "rx=%u bytes, %u lines, %u sentences parsed in %d ms",
+                         (unsigned)s_rx_window, (unsigned)s_lines_window,
+                         (unsigned)s_sent_window, APP_GNSS_REPORT_MS);
+                if (s_have_rmc) {
+                    ESP_LOGW(TAG, "  RMC: %s", s_rmc);
+                } else {
+                    ESP_LOGW(TAG, "  no RMC sentence seen in this window; only RMC produces "
+                             "a UTC epoch");
+                }
+                ESP_LOGW(TAG, "  parser: fix=%u mode=%u sats_used=%u sats_view=%u hdop=%.1f "
+                         "utc=%d pos=%d",
+                         (unsigned)st.fix_type, (unsigned)st.fix_mode,
+                         (unsigned)st.sats_used, (unsigned)st.sats_view,
+                         (double)st.hdop, (int)st.utc_valid, (int)st.pos_valid);
+                /* The whole window's opening bytes, for when even the RMC line is
+                 * not enough to tell what the receiver is sending. */
+                ESP_LOG_BUFFER_CHAR_LEVEL(TAG, s_dump, s_dump_len, ESP_LOG_DEBUG);
+            }
+
+            s_rx_window = 0;
+            s_lines_window = 0;
+            s_sent_window = 0;
+            s_dump_len = 0;
+            s_have_rmc = false;
         }
     }
 }
@@ -235,6 +339,7 @@ esp_err_t gnss_uart_init(void)
              APP_GNSS_UART_PORT, APP_GNSS_BAUD, PIN_GNSS_UART_RX, PIN_GNSS_UART_TX);
 
     s_ready = true;
+    s_last_report_us = esp_timer_get_time();
     return ESP_OK;
 }
 

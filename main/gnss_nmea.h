@@ -56,6 +56,7 @@ typedef enum {
     GNSS_NMEA_INVALID = 0, /* not a supported/valid sentence */
     GNSS_NMEA_OK,          /* parsed, no new epoch */
     GNSS_NMEA_EPOCH,       /* parsed, a new UTC second is complete */
+    GNSS_NMEA_STATUS,      /* RMC arrived but carries no UTC time: no fix yet */
 } gnss_nmea_res_t;
 
 void gnss_nmea_reset(gnss_nmea_t *st);

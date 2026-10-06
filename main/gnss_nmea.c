@@ -223,7 +223,10 @@ static gnss_nmea_res_t handle_rmc(gnss_nmea_t *st, char *f[], int n)
     }
 
     if (!time_ok) {
-        return GNSS_NMEA_INVALID;
+        /* The receiver has no fix, so RMC carries no time and no date. Report it
+         * as a status rather than as garbage: the caller can then log the link
+         * quality without inventing a UTC epoch. */
+        return GNSS_NMEA_STATUS;
     }
 
     const uint32_t key = (uint32_t)st->hour * 3600u +

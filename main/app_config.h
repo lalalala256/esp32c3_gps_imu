@@ -111,6 +111,14 @@
 #define APP_GNSS_READ_CHUNK         64
 #define APP_GNSS_READ_TIMEOUT_MS    20
 
+/*
+ * How often the GNSS task reports on raw UART traffic. Without it a silent wire
+ * and a wire carrying bytes the parser rejects are indistinguishable: both show
+ * up as zero epochs in the status line.
+ */
+#define APP_GNSS_REPORT_MS          5000
+#define APP_GNSS_REPORT_DUMP_BYTES  48
+
 /* ------------------------------------------------------------------ keys */
 #define APP_KEY_DEBOUNCE_MS         CONFIG_APP_KEY_DEBOUNCE_MS
 #define APP_KEY_POLL_MS             10

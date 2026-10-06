@@ -11,6 +11,7 @@
 #include "app_config.h"
 #include "board_pins.h"
 #include "data_types.h"
+#include "power.h"
 
 #include "driver/gpio.h"
 #include "esp_log.h"
@@ -27,11 +28,23 @@ typedef struct {
     int          raw;            /* last raw level (1 = released, 0 = pressed) */
     int          stable;         /* debounced level */
     TickType_t   last_change;
+    TickType_t   pressed_at;     /* start of the debounced press */
+    bool         long_fired;     /* long press already acted upon */
+    /*
+     * KEY1 carries both a short press (toggle logging) and a long press
+     * (sleep), so its press event is emitted on release: firing it on press
+     * would mean every request to sleep also toggled logging on the way in.
+     * KEY2 has only one meaning, so it keeps reporting on press.
+     */
+    bool         defer_press;
+    void       (*on_long_press)(void);
 } key_ctx_t;
 
 static key_ctx_t s_keys[] = {
-    { .pin = PIN_KEY1, .src = SRC_KEY1, .press_event = EVT_KEY1_PRESS },
-    { .pin = PIN_KEY2, .src = SRC_KEY2, .press_event = EVT_KEY2_PRESS },
+    { .pin = PIN_KEY1, .src = SRC_KEY1, .press_event = EVT_KEY1_PRESS,
+      .defer_press = true,  .on_long_press = power_request_sleep },
+    { .pin = PIN_KEY2, .src = SRC_KEY2, .press_event = EVT_KEY2_PRESS,
+      .defer_press = false, .on_long_press = NULL },
 };
 
 #define KEY_COUNT (sizeof(s_keys) / sizeof(s_keys[0]))
@@ -42,6 +55,7 @@ static void keys_task(void *arg)
 
     const TickType_t debounce = pdMS_TO_TICKS(APP_KEY_DEBOUNCE_MS);
     const TickType_t poll = pdMS_TO_TICKS(APP_KEY_POLL_MS);
+    const TickType_t longpress = pdMS_TO_TICKS(APP_KEY_LONGPRESS_MS);
 
     for (;;) {
         const TickType_t now = xTaskGetTickCount();
@@ -58,9 +72,31 @@ static void keys_task(void *arg)
 
             if (level != k->stable && (now - k->last_change) >= debounce) {
                 k->stable = level;
+
                 if (level == 0) {
+                    k->pressed_at = now;
+                    k->long_fired = false;
+                    if (!k->defer_press) {
+                        ESP_LOGI(TAG, "KEY%d pressed", (int)(i + 1));
+                        app_event_log(esp_timer_get_time(), k->src, k->press_event);
+                    }
+                } else if (k->defer_press && !k->long_fired) {
+                    /* Released before the threshold, so now that it is known
+                     * not to have been a hold, this was a short press. */
                     ESP_LOGI(TAG, "KEY%d pressed", (int)(i + 1));
                     app_event_log(esp_timer_get_time(), k->src, k->press_event);
+                }
+                continue;
+            }
+
+            /* Still held: long enough to mean something other than a press? */
+            if (k->stable == 0 && !k->long_fired &&
+                (now - k->pressed_at) >= longpress) {
+                k->long_fired = true;
+                ESP_LOGI(TAG, "KEY%d long press (%d ms)", (int)(i + 1),
+                         APP_KEY_LONGPRESS_MS);
+                if (k->on_long_press) {
+                    k->on_long_press();
                 }
             }
         }
@@ -89,10 +125,12 @@ esp_err_t keys_init(void)
         s_keys[i].raw = gpio_get_level(s_keys[i].pin);
         s_keys[i].stable = s_keys[i].raw;
         s_keys[i].last_change = xTaskGetTickCount();
+        s_keys[i].pressed_at = 0;
+        s_keys[i].long_fired = false;
     }
 
-    ESP_LOGI(TAG, "KEY1=GPIO%d (log start/stop), KEY2=GPIO%d (mark)",
-             PIN_KEY1, PIN_KEY2);
+    ESP_LOGI(TAG, "KEY1=GPIO%d (log start/stop, hold for sleep), "
+             "KEY2=GPIO%d (mark)", PIN_KEY1, PIN_KEY2);
     return ESP_OK;
 }
 

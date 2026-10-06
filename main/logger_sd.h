@@ -19,7 +19,10 @@ typedef enum {
 typedef struct {
     bool     sd_mounted;
     bool     logging;
-    uint32_t run_index;
+    /* Base name shared by the four files of the current session, so the status
+     * line names the recording without anyone having to list the directory.
+     * Sized to match APP_LOG_BASE_BYTES. */
+    char     session[32];
     uint32_t spi_khz;
     uint64_t rows[LOGGER_FILE_COUNT];
     uint64_t bytes_written;
@@ -47,6 +50,16 @@ bool logger_is_logging(void);
 
 /* True while a card is mounted and the run files are open. */
 bool logger_sd_mounted(void);
+
+/*
+ * Stop logging, flush and close the run files and unmount the card.
+ *
+ * This is the last thing done before deep sleep, where an unflushed file is the
+ * difference between a readable CSV and one whose final blocks never reached
+ * the card. The files stay closed afterwards - write_row() is a no-op once the
+ * pointers are NULL - so the logger task can keep running harmlessly.
+ */
+void logger_shutdown_for_sleep(void);
 
 /*
  * Serialises TF card access between the logger task and other users (the web

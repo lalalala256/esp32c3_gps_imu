@@ -43,6 +43,7 @@
 
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 static const char *TAG = "web";
 
@@ -584,23 +585,52 @@ static esp_err_t h_stream(httpd_req_t *req)
     httpd_resp_set_hdr(req, "X-Accel-Buffering", "no");
 
     const TickType_t period = pdMS_TO_TICKS(APP_WEB_STREAM_PERIOD_MS);
+    const int64_t started = esp_timer_get_time();
+    const int64_t deadline =
+        started + (int64_t)APP_WEB_STREAM_MAX_S * 1000000;
 
-    /* One priming comment so the browser fires onopen immediately instead of
-     * waiting for the first sample. */
-    if (httpd_resp_send_chunk(req, ": live\n\n", 8) != ESP_OK) {
+    /*
+     * One priming comment so the browser fires onopen immediately instead of
+     * waiting for the first sample, and a short retry so the reconnect that
+     * follows the deliberate close below is quick. Size taken from the literal:
+     * a hand-counted byte count here is one character away from truncating the
+     * blank line that terminates the event.
+     */
+    static const char PRIME[] = ": live\nretry: 500\n\n";
+    if (httpd_resp_send_chunk(req, PRIME, sizeof(PRIME) - 1) != ESP_OK) {
         return ESP_OK;
     }
+
+    esp_err_t err = ESP_OK;
 
     for (;;) {
         build_live_json(json, sizeof(json));
         const int n = clamp_len(snprintf(body, sizeof(body), "data: %s\n\n", json),
                                 sizeof(body));
 
-        if (httpd_resp_send_chunk(req, body, n) != ESP_OK) {
+        err = httpd_resp_send_chunk(req, body, n);
+        if (err != ESP_OK) {
             break;                  /* client went away */
+        }
+        if (esp_timer_get_time() >= deadline) {
+            break;                  /* hand the connection back, browser reconnects */
         }
         vTaskDelay(period);
     }
+
+    if (err == ESP_OK) {
+        httpd_resp_send_chunk(req, NULL, 0);   /* finish cleanly, not by timeout */
+    }
+
+    /*
+     * One line per connection, every APP_WEB_STREAM_MAX_S at worst. Worth it:
+     * a stream that is not being rotated is exactly the failure that starves
+     * every other request of a connection, and this is the only place that is
+     * visible. Seen once every 20 s per open tab.
+     */
+    ESP_LOGI(TAG, "live stream %s after %lld s",
+             (err == ESP_OK) ? "rotated" : "ended (client gone)",
+             (long long)((esp_timer_get_time() - started) / 1000000));
     return ESP_OK;
 }
 

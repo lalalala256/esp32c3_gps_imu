@@ -87,6 +87,16 @@ menu "GPS/IMU acquisition"
         range 5 500
         default 30
 
+    config APP_KEY_LONGPRESS_MS
+        int "Key long-press time (ms)"
+        range 300 10000
+        default 2000
+        help
+            Holding KEY1 for this long puts the board into deep sleep; either
+            KEY1 or KEY2 wakes it again. A short KEY1 press keeps its existing
+            meaning (toggle logging), which is why the press event is emitted
+            on release instead of on press.
+
     config APP_I2C_FREQ_HZ
         int "I2C bus clock (Hz)"
         range 100000 1000000

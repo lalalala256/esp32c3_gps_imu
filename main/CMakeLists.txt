@@ -11,6 +11,7 @@ idf_component_register(
         "pps_capture.c"
         "keys.c"
         "logger_sd.c"
+        "power.c"
         "status.c"
         "heartbeat.c"
         "wifi_ap.c"

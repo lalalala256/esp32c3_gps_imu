@@ -86,6 +86,9 @@ typedef enum {
     EVT_SD_ERROR,
     EVT_SD_REMOUNT,
     EVT_SENSOR_MISSING,
+    /* Appended rather than inserted: this enum is written into the event log,
+     * so the existing values must keep their numbers. */
+    EVT_SESSION_SYNC,
 } log_event_t;
 
 typedef enum {

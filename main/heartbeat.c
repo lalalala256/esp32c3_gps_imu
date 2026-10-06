@@ -159,3 +159,11 @@ void heartbeat_start_task(void)
     }
     xTaskCreate(heartbeat_task, "heartbeat", APP_STACK_LED, NULL, APP_PRIO_LED, NULL);
 }
+
+void heartbeat_off(void)
+{
+    if (!s_active) {
+        return;
+    }
+    led_off();
+}

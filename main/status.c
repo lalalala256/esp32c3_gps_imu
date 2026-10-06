@@ -74,14 +74,15 @@ static void status_task(void *arg)
                 ? (pps.max_interval_us - pps.min_interval_us) : 0;
 
         ESP_LOGI(TAG,
-                 "up=%us imu=%uHz mag=%uHz gnss=%u/s log=%s run=%u "
+                 "up=%us imu=%uHz mag=%uHz gnss=%u/s log=%s session=%s "
                  "utc=%s fix=%u/%u sats=%u hdop=%.2f "
                  "pps=%u iv=%uus jit=%uus "
                  "rows=%llu/%llu/%llu/%llu bytes=%llu err=%u rst=%u "
                  "drop=%u/%u/%u/%u sd=%s",
                  (unsigned)(esp_timer_get_time() / 1000000),
                  imu_hz, mag_hz, gnss_hz,
-                 ls.logging ? "on" : "off", (unsigned)ls.run_index,
+                 ls.logging ? "on" : "off",
+                 ls.session[0] ? ls.session : "-",
                  utc, (unsigned)g.fix_type, (unsigned)g.fix_mode,
                  (unsigned)g.sats, g.hdop,
                  (unsigned)pps.seq, (unsigned)pps.last_interval_us, (unsigned)pps_jitter,

@@ -454,6 +454,21 @@ bool wifi_ap_is_up(void)
     return s_up;
 }
 
+void wifi_ap_stop(void)
+{
+    if (!s_up) {
+        return;
+    }
+    s_up = false;
+
+    const esp_err_t err = esp_wifi_stop();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_stop failed: %s", esp_err_to_name(err));
+        return;
+    }
+    ESP_LOGI(TAG, "SoftAP stopped for sleep");
+}
+
 const char *wifi_ap_ip_str(void)
 {
     return s_ip;

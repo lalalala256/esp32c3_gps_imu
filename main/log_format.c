@@ -2,13 +2,13 @@
 
 #include <stdio.h>
 
-const char LOG_HEADER_IMU[]   = "t_us,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,valid";
-const char LOG_HEADER_MAG[]   = "t_us,mx_mG,my_mG,mz_mG,valid";
-const char LOG_HEADER_GNSS[]  = "t_us,pps_t_us,pps_seq,utc_date,utc_time,"
+const char LOG_HEADER_IMU[]   = "t_us,utc_us,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,valid";
+const char LOG_HEADER_MAG[]   = "t_us,utc_us,mx_mG,my_mG,mz_mG,valid";
+const char LOG_HEADER_GNSS[]  = "t_us,utc_us,pps_t_us,pps_seq,utc_date,utc_time,"
                                 "lat_deg,lon_deg,alt_msl_m,geoid_sep_m,"
                                 "speed_mps,course_deg,fix_type,fix_mode,sats,"
                                 "hdop,valid";
-const char LOG_HEADER_EVENT[] = "t_us,src,event";
+const char LOG_HEADER_EVENT[] = "t_us,utc_us,src,event,lat_deg,lon_deg,pos_valid";
 
 /*
  * Truncation-safe snprintf wrapper: returns the number of characters that were
@@ -25,26 +25,28 @@ static int finish(char *buf, size_t n, int want)
     return want;
 }
 
-int log_fmt_imu(char *buf, size_t n, const imu_sample_t *s)
+int log_fmt_imu(char *buf, size_t n, const imu_sample_t *s, const log_ctx_t *c)
 {
     return finish(buf, n, snprintf(buf, n,
-        "%lld,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%d",
+        "%lld,%lld,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%d",
         (long long)s->t_us,
+        (long long)c->utc_us,
         s->ax, s->ay, s->az,
         s->gx, s->gy, s->gz,
         s->valid ? 1 : 0));
 }
 
-int log_fmt_mag(char *buf, size_t n, const mag_sample_t *s)
+int log_fmt_mag(char *buf, size_t n, const mag_sample_t *s, const log_ctx_t *c)
 {
     return finish(buf, n, snprintf(buf, n,
-        "%lld,%.2f,%.2f,%.2f,%d",
+        "%lld,%lld,%.2f,%.2f,%.2f,%d",
         (long long)s->t_us,
+        (long long)c->utc_us,
         s->mx, s->my, s->mz,
         s->valid ? 1 : 0));
 }
 
-int log_fmt_gnss(char *buf, size_t n, const gnss_sample_t *s)
+int log_fmt_gnss(char *buf, size_t n, const gnss_sample_t *s, const log_ctx_t *c)
 {
     char date[16] = "";
     char time[24] = "";
@@ -60,8 +62,9 @@ int log_fmt_gnss(char *buf, size_t n, const gnss_sample_t *s)
     const int valid = (s->utc_valid || s->pos_valid) ? 1 : 0;
 
     return finish(buf, n, snprintf(buf, n,
-        "%lld,%lld,%u,%s,%s,%.7f,%.7f,%.3f,%.3f,%.3f,%.2f,%u,%u,%u,%.2f,%d",
+        "%lld,%lld,%lld,%u,%s,%s,%.7f,%.7f,%.3f,%.3f,%.3f,%.2f,%u,%u,%u,%.2f,%d",
         (long long)s->t_us,
+        (long long)c->utc_us,
         (long long)s->pps_t_us,
         (unsigned)s->pps_seq,
         date, time,
@@ -73,13 +76,16 @@ int log_fmt_gnss(char *buf, size_t n, const gnss_sample_t *s)
         valid));
 }
 
-int log_fmt_event(char *buf, size_t n, const key_event_t *s)
+int log_fmt_event(char *buf, size_t n, const key_event_t *s, const log_ctx_t *c)
 {
     return finish(buf, n, snprintf(buf, n,
-        "%lld,%s,%s",
+        "%lld,%lld,%s,%s,%.7f,%.7f,%d",
         (long long)s->t_us,
+        (long long)c->utc_us,
         log_source_name(s->src),
-        log_event_name(s->event)));
+        log_event_name(s->event),
+        c->lat_deg, c->lon_deg,
+        c->pos_valid ? 1 : 0));
 }
 
 const char *log_source_name(uint8_t src)
@@ -105,6 +111,7 @@ const char *log_event_name(uint8_t evt)
     case EVT_SD_ERROR:        return "SD_ERROR";
     case EVT_SD_REMOUNT:      return "SD_REMOUNT";
     case EVT_SENSOR_MISSING:  return "SENSOR_MISSING";
+    case EVT_SESSION_SYNC:    return "SESSION_SYNC";
     default:                  return "UNKNOWN";
     }
 }

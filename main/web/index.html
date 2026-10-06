@@ -144,6 +144,35 @@ function human(n) {
   return (n / 1048576).toFixed(2) + " MiB";
 }
 
+/*
+ * fetch() has no timeout of its own, so a request the device never answers
+ * leaves the page sitting on its "loading" text with nothing to click and no
+ * error to read. A hang that at least reports itself as a hang is worth the few
+ * extra lines.
+ */
+function fetchT(url, ms) {
+  var ctrl = ("AbortController" in window) ? new AbortController() : null;
+  var opts = { cache: "no-store" };
+  var timer = null;
+
+  if (ctrl) {
+    opts.signal = ctrl.signal;
+    timer = setTimeout(function () { ctrl.abort(); }, ms);
+  }
+
+  function done() { if (timer) { clearTimeout(timer); timer = null; } }
+
+  return fetch(url, opts).then(
+    function (r) { done(); return r; },
+    function (e) { done(); throw e; });
+}
+
+function errText(e) {
+  return (e && e.name === "AbortError")
+    ? "\u8bbe\u5907\u6ca1\u6709\u54cd\u5e94\uff08\u8d85\u65f6\uff09"
+    : String(e);
+}
+
 function esc(s) {
   return String(s).replace(/[&<>"']/g, function (c) {
     return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
@@ -531,7 +560,7 @@ function startStream() {
 var lastNames = "";
 
 function refreshFiles() {
-  fetch("/files", { cache: "no-store" })
+  fetchT("/files", 8000)
     .then(function (r) { return r.json(); })
     .then(function (j) {
       var el = $("status");
@@ -578,8 +607,8 @@ function act(what, name) {
   var pre = $("preview");
   $("pvname").textContent = name;
   pre.textContent = "loading\u2026";
-  fetch("/preview?f=" + encodeURIComponent(name) + "&tail=" + (what === "tail" ? 1 : 0),
-        { cache: "no-store" })
+  fetchT("/preview?f=" + encodeURIComponent(name) + "&tail=" + (what === "tail" ? 1 : 0),
+        15000)
     .then(function (r) { return r.text(); })
     .then(function (t) { pre.textContent = t; pre.scrollTop = pre.scrollHeight; })
     .catch(function (e) { pre.textContent = "error: " + e; });
@@ -590,7 +619,7 @@ function act(what, name) {
 function scanI2c() {
   var pre = $("i2c");
   pre.textContent = "\u626b\u63cf\u4e2d\u2026";
-  fetch("/i2c", { cache: "no-store" })
+  fetchT("/i2c", 15000)
     .then(function (r) { return r.text(); })
     .then(function (t) { pre.textContent = t; })
     .catch(function (e) { pre.textContent = "\u65e0\u6cd5\u8bbf\u95ee\u8bbe\u5907: " + e; });

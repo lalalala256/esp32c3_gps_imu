@@ -13,3 +13,9 @@ esp_err_t heartbeat_init(void);
 
 /* Create the blinking task (call after logger_init). */
 void heartbeat_start_task(void);
+
+/*
+ * Turn the LED off and leave it off. Called on the way into sleep: a pin left
+ * driving the LED would keep it lit for the whole time the chip is asleep.
+ */
+void heartbeat_off(void);

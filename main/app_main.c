@@ -25,6 +25,7 @@
 #include "keys.h"
 #include "logger_sd.h"
 #include "log_format.h"
+#include "power.h"
 #include "pps_capture.h"
 #include "sensor_imu.h"
 #include "sensor_mag.h"
@@ -96,6 +97,10 @@ static unsigned i2c_bus_scan(void)
 
 void app_main(void)
 {
+    /* Reported first: whether this run is a cold boot or a wake from sleep
+     * decides how the boot that follows should be read. */
+    power_log_wakeup_cause();
+
     create_shared_objects();
     if (!g_gnss_mutex || !g_sensor_mutex || !q_imu || !q_mag || !q_gnss || !q_key || !q_pps) {
         ESP_LOGE(TAG, "shared queue/mutex allocation failed, aborting");
@@ -168,9 +173,14 @@ void app_main(void)
         ESP_LOGW(TAG, "GNSS without PPS: UTC epochs will be logged unpaired");
     }
 
-    if (keys_init() != ESP_OK) {
+    const bool keys_ok = (keys_init() == ESP_OK);
+    if (!keys_ok) {
         ESP_LOGW(TAG, "keys unavailable, logging will stay at its boot state");
     }
+
+    /* Refuses to arm itself if the keys are not valid wake pins on this chip,
+     * so the board can never be put to sleep with no way back. */
+    const bool power_ok = (power_init() == ESP_OK);
 
     status_init();
     logger_init();
@@ -189,6 +199,10 @@ void app_main(void)
     logger_start_task();
     status_start_task();
     heartbeat_start_task();
+
+    if (power_ok) {
+        power_start_task();
+    }
 
 #if APP_WIFI_ENABLE
     /* Started last on purpose: the acquisition pipeline is already running, and

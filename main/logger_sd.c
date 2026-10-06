@@ -102,6 +102,24 @@ static bool               s_bus_inited;
 static FILE              *s_f[LOGGER_FILE_COUNT];
 static char               s_path[LOGGER_FILE_COUNT][80];
 
+/*
+ * Session identity, and the anchor that ties the monotonic clock to UTC.
+ *
+ * The four files of one recording all share `s_base` (see open_session() for
+ * the naming scheme). `s_synced` latches once the recording has been restarted
+ * under the GNSS time, so a receiver that loses and later re-acquires time does
+ * not roll the files over a second time.
+ *
+ * The anchor is a single (utc_us, t_us) pair: every row's absolute time is then
+ * anchor_utc + (row_t_us - anchor_t_us), which is what lets each file carry a
+ * microsecond UTC column while the logger runs at 100 Hz.
+ */
+static char               s_base[APP_LOG_BASE_BYTES];
+static bool               s_synced;
+static bool               s_utc_anchor_valid;
+static int64_t            s_utc_anchor_us;
+static int64_t            s_utc_anchor_t_us;
+
 static SemaphoreHandle_t  s_status_mutex;
 static logger_status_t    s_status;
 
@@ -114,6 +132,17 @@ static uint32_t           s_consec_errors;
 static unsigned           s_mirror_count[LOGGER_FILE_COUNT];
 static bool               s_logging;
 static bool               s_task_started;
+
+/*
+ * Set once the sleep path has closed the card, and never cleared: waking from
+ * deep sleep is a reboot, so this run of the firmware has no card to return to.
+ *
+ * Without it the logger's "keep trying to mount a card that was absent" loop
+ * happily remounts and reopens the files seconds after they were closed, which
+ * is exactly the state deep sleep must not be entered in - the reopened files
+ * would still hold unflushed data when the chip powers down.
+ */
+static volatile bool      s_shutdown;
 
 /* ------------------------------------------------------------ small helpers */
 
@@ -179,6 +208,129 @@ bool logger_sd_mounted(void)
     return s_status.sd_mounted;
 }
 
+/* Defined below, next to the other file handling. */
+static void close_files(void);
+
+void logger_shutdown_for_sleep(void)
+{
+    /*
+     * Set before anything is closed, so the logger task cannot slip a remount
+     * in between the close and the unmount. Also stops the logging toggle: a
+     * key event arriving during the teardown must not restart recording into
+     * files that are about to be closed.
+     */
+    s_shutdown = true;
+    s_logging = false;
+    status_set_logging(false);
+
+    close_files();
+
+    fs_lock();
+    if (s_card) {
+        const esp_err_t e = esp_vfs_fat_sdcard_unmount(APP_LOG_MOUNT_POINT, s_card);
+        if (e != ESP_OK) {
+            ESP_LOGW(TAG, "unmount failed: %s", esp_err_to_name(e));
+        }
+        s_card = NULL;
+    }
+    fs_unlock();
+
+    status_lock();
+    s_status.sd_mounted = false;
+    status_unlock();
+
+    ESP_LOGI(TAG, "logging closed for sleep");
+}
+
+/* ------------------------------------------------------- time bookkeeping */
+
+/*
+ * Days since 1970-01-01 for a proleptic Gregorian date.
+ *
+ * Written out rather than calling timegm(), which in newlib reads the TZ
+ * environment and would silently shift the timestamps of a board with no clock
+ * configuration at all.
+ */
+static int64_t days_from_civil(long y, unsigned m, unsigned d)
+{
+    y -= (m <= 2);
+    const long era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = (unsigned)(y - era * 400);
+    const unsigned doy = (153u * (m + (m > 2 ? -3 : 9)) + 2u) / 5u + d - 1u;
+    const unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+    return era * 146097L + (long)doe - 719468L;
+}
+
+/*
+ * UTC of a GNSS epoch in microseconds since the Unix epoch, or 0 when the
+ * receiver has no usable time.
+ *
+ * The year floor is not paranoia: a receiver that has not decoded the almanac
+ * yet can report a plausible-looking but wrong date, and naming a recording
+ * after it would be worse than waiting for a real one.
+ */
+static int64_t gnss_utc_us(const gnss_sample_t *s)
+{
+    if (!s->utc_valid || s->year < APP_LOG_MIN_YEAR || s->month < 1 ||
+        s->month > 12 || s->day < 1 || s->day > 31 ||
+        s->hour > 23 || s->minute > 59 || s->second > 60) {
+        return 0;
+    }
+
+    const int64_t days = days_from_civil((long)s->year, s->month, s->day);
+    const int64_t secs = days * 86400 + (int64_t)s->hour * 3600 +
+                         (int64_t)s->minute * 60 + s->second;
+
+    return secs * 1000000 + (int64_t)s->millisecond * 1000;
+}
+
+/*
+ * Re-anchor on every epoch that carries a time. Each one is a fresh, exact
+ * correspondence between the two clocks, so using the newest keeps the derived
+ * UTC from drifting with the local oscillator.
+ */
+static void update_utc_anchor(const gnss_sample_t *s)
+{
+    const int64_t utc = gnss_utc_us(s);
+    if (utc <= 0) {
+        return;
+    }
+    s_utc_anchor_us = utc;
+    s_utc_anchor_t_us = s->t_us;
+    s_utc_anchor_valid = true;
+}
+
+static int64_t utc_us_of(int64_t t_us)
+{
+    return s_utc_anchor_valid ? (s_utc_anchor_us + (t_us - s_utc_anchor_t_us)) : 0;
+}
+
+/* Time only: the 100 Hz streams have no use for a position. */
+static log_ctx_t ctx_time(int64_t t_us)
+{
+    const log_ctx_t c = { .utc_us = utc_us_of(t_us) };
+    return c;
+}
+
+/*
+ * Time plus the last known position, for the event file: this is what lets a
+ * KEY2 mark be plotted on a map straight from that one file.
+ */
+static log_ctx_t ctx_mark(int64_t t_us)
+{
+    gnss_sample_t g;
+    pps_stats_t pps;
+    app_state_get_gnss(&g, &pps);
+
+    const log_ctx_t c = {
+        .utc_us    = utc_us_of(t_us),
+        .lat_deg   = g.pos_valid ? g.lat_deg : 0.0,
+        .lon_deg   = g.pos_valid ? g.lon_deg : 0.0,
+        .pos_valid = g.pos_valid,
+    };
+    return c;
+}
+
 /* ------------------------------------------------------------- file handling */
 
 static void close_files(void)
@@ -195,43 +347,83 @@ static void close_files(void)
     fs_unlock();
 }
 
-static void write_metadata(int idx, uint32_t run)
+static void write_metadata(int idx, const char *base)
 {
     FILE *f = s_f[idx];
     if (!f) {
         return;
     }
 
+    /*
+     * The anchor line first, because it is what makes an offline join possible
+     * without opening any other file: utc_us and t_us there are the same
+     * instant, so every row's absolute time is anchor_utc + (t_us - anchor_t).
+     */
+    if (s_utc_anchor_valid) {
+        fprintf(f, "# anchor utc_us=%lld t_us=%lld\n",
+                (long long)s_utc_anchor_us, (long long)s_utc_anchor_t_us);
+    } else {
+        fprintf(f, "# anchor none (the receiver had no usable time yet)\n");
+    }
+
     switch (idx) {
     case LOGGER_FILE_IMU:
-        fprintf(f, "# imu run=%u odr_hz=%d acc_g=%d gyr_dps=%d int1=%d\n",
-                (unsigned)run, APP_IMU_ODR_HZ, META_ACC_G, META_GYR_DPS,
+        fprintf(f, "# imu session=%s odr_hz=%d acc_g=%d gyr_dps=%d int1=%d\n",
+                base, APP_IMU_ODR_HZ, META_ACC_G, META_GYR_DPS,
                 APP_BMI160_USE_INT1);
         break;
     case LOGGER_FILE_MAG:
-        fprintf(f, "# mag run=%u odr_hz=%d osr=%d rng_g=%d\n",
-                (unsigned)run, APP_MAG_RATE_HZ, META_MAG_OSR, META_MAG_G);
+        fprintf(f, "# mag session=%s odr_hz=%d osr=%d rng_g=%d\n",
+                base, APP_MAG_RATE_HZ, META_MAG_OSR, META_MAG_G);
         break;
     case LOGGER_FILE_GNSS:
-        fprintf(f, "# gnss run=%u baud=%d uart=%d epoch=RMC pps_gpio=%d\n",
-                (unsigned)run, APP_GNSS_BAUD, APP_GNSS_UART_PORT, PIN_GNSS_PPS);
+        fprintf(f, "# gnss session=%s baud=%d uart=%d epoch=RMC pps_gpio=%d\n",
+                base, APP_GNSS_BAUD, APP_GNSS_UART_PORT, PIN_GNSS_PPS);
         break;
     default:
-        fprintf(f, "# events run=%u\n", (unsigned)run);
+        fprintf(f, "# events session=%s\n", base);
         break;
     }
 
     fprintf(f, "%s\n", s_header[idx]);
 }
 
-static esp_err_t open_run_files(uint32_t run)
+/*
+ * Open the four files of one session.
+ *
+ * Naming
+ * ------
+ * The four files of a recording share a base name, so a later fusion step can
+ * find them by prefix with no manifest:
+ *
+ *   20261006_062222_imu.csv
+ *   20261006_062222_mag.csv
+ *   20261006_062222_gnss.csv
+ *   20261006_062222_events.csv
+ *
+ * The base is the GNSS UTC of the first epoch that carried a usable time, which
+ * is what makes the name meaningful later and what tells recordings from two
+ * boards apart. Until the receiver has a time there is nothing but uptime to go
+ * on, so those files are `nosync_NNNN_*` and the recording restarts - into a
+ * fresh, time-named set - the moment a time arrives. The nosync set is not
+ * wasted, it still holds everything recorded before the fix.
+ *
+ * `append` reopens existing files instead of truncating them, which is what a
+ * remount after a transient write error needs: a flaky card is not a reason to
+ * throw away the recording so far.
+ */
+static esp_err_t open_session(const char *base, bool append)
 {
+    if (s_shutdown) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
     fs_lock();
     for (int i = 0; i < LOGGER_FILE_COUNT; i++) {
-        snprintf(s_path[i], sizeof(s_path[i]), "%s/%s_%04u.csv",
-                 APP_LOG_MOUNT_POINT, s_ext[i], (unsigned)run);
+        snprintf(s_path[i], sizeof(s_path[i]), "%s/%s_%s.csv",
+                 APP_LOG_MOUNT_POINT, base, s_ext[i]);
 
-        s_f[i] = fopen(s_path[i], "w");
+        s_f[i] = fopen(s_path[i], append ? "a" : "w");
         if (!s_f[i]) {
             ESP_LOGE(TAG, "cannot open %s", s_path[i]);
             close_files();
@@ -241,14 +433,148 @@ static esp_err_t open_run_files(uint32_t run)
         if (setvbuf(s_f[i], NULL, _IOFBF, APP_LOG_FILE_BUF_BYTES) != 0) {
             ESP_LOGW(TAG, "setvbuf failed for %s", s_path[i]);
         }
-        write_metadata(i, run);
+        write_metadata(i, base);
+    }
+
+    snprintf(s_base, sizeof(s_base), "%s", base);
+    status_lock();
+    snprintf(s_status.session, sizeof(s_status.session), "%s", base);
+    status_unlock();
+    fs_unlock();
+
+    ESP_LOGI(TAG, "session %s -> %s/%s_{%s,%s,%s,%s}.csv", base,
+             APP_LOG_MOUNT_POINT, base, s_ext[0], s_ext[1], s_ext[2], s_ext[3]);
+    return ESP_OK;
+}
+
+/*
+ * Make `base` unique on the card by appending a counter.
+ *
+ * A GNSS-second name can only collide after a restart inside the same second,
+ * but "the file already existed" is a bad way to discover that a recording has
+ * been overwritten.
+ */
+static void unique_base(char *base, size_t n)
+{
+    char candidate[APP_LOG_BASE_BYTES];
+    char probe[96];
+
+    for (unsigned suffix = 0; suffix < 100; suffix++) {
+        if (suffix == 0) {
+            snprintf(candidate, sizeof(candidate), "%s", base);
+        } else {
+            snprintf(candidate, sizeof(candidate), "%s_%u", base, suffix);
+        }
+
+        snprintf(probe, sizeof(probe), "%s/%s_%s.csv", APP_LOG_MOUNT_POINT,
+                 candidate, s_ext[LOGGER_FILE_IMU]);
+
+        /* Under the card lock: the web server reads the same filesystem from
+         * another task, and FATFS itself is only safe because every access in
+         * this project goes through this mutex. */
+        fs_lock();
+        FILE *f = fopen(probe, "r");
+        if (!f) {
+            fs_unlock();
+            snprintf(base, n, "%s", candidate);
+            return;                 /* free */
+        }
+        fclose(f);
+        fs_unlock();
+    }
+}
+
+/* Next free nosync index, so boots without a fix never overwrite earlier data. */
+static void nosync_base(char *base, size_t n)
+{
+    unsigned max = 0;
+
+    fs_lock();
+    DIR *dir = opendir(APP_LOG_MOUNT_POINT);
+    if (dir) {
+        struct dirent *e;
+        while ((e = readdir(dir)) != NULL) {
+            unsigned idx;
+            if (strncmp(e->d_name, "nosync_", 7) == 0 &&
+                sscanf(e->d_name, "%*[^_]_%u", &idx) == 1 && idx > max) {
+                max = idx;
+            }
+        }
+        closedir(dir);
     }
     fs_unlock();
 
-    ESP_LOGI(TAG, "run %u: %s/{%s,%s,%s,%s}_%04u.csv",
-             (unsigned)run, APP_LOG_MOUNT_POINT,
-             s_ext[0], s_ext[1], s_ext[2], s_ext[3], (unsigned)run);
-    return ESP_OK;
+    snprintf(base, n, "nosync_%04u", max + 1);
+}
+
+/*
+ * Get the logger recording, without discarding anything already recorded.
+ *
+ * Reopens the current session when there is one (a card that came back after a
+ * write error), and otherwise starts a fresh one. False means the files could
+ * not be opened and the logger is on the serial mirror only.
+ */
+static bool start_session(void)
+{
+    if (s_base[0] && open_session(s_base, true) == ESP_OK) {
+        return true;
+    }
+
+    char base[APP_LOG_BASE_BYTES];
+    nosync_base(base, sizeof(base));
+    unique_base(base, sizeof(base));
+    return open_session(base, false) == ESP_OK;
+}
+
+/*
+ * Restart the recording under a name taken from the GNSS clock. Called for
+ * every GNSS epoch until it succeeds.
+ */
+static void sync_to_gps_time(const gnss_sample_t *s)
+{
+    if (s_synced) {
+        return;
+    }
+
+    const int64_t utc = gnss_utc_us(s);
+    if (utc <= 0) {
+        return;
+    }
+
+    char base[APP_LOG_BASE_BYTES];
+    snprintf(base, sizeof(base), "%04u%02u%02u_%02u%02u%02u",
+             (unsigned)s->year, (unsigned)s->month, (unsigned)s->day,
+             (unsigned)s->hour, (unsigned)s->minute, (unsigned)s->second);
+
+    /*
+     * Anchor before the files move, so the first row written into the new
+     * session already carries an absolute time.
+     */
+    s_utc_anchor_us = utc;
+    s_utc_anchor_t_us = s->t_us;
+    s_utc_anchor_valid = true;
+    s_synced = true;
+
+    ESP_LOGW(TAG, "GNSS time available: restarting the recording as %s", base);
+
+    if (!s_status.sd_mounted) {
+        return;                 /* serial-only: the anchor is all there is to do */
+    }
+
+    fs_lock();
+    close_files();
+    fs_unlock();
+
+    unique_base(base, sizeof(base));
+    if (open_session(base, false) != ESP_OK) {
+        /* Do not leave the logger with nothing open because a rename failed. */
+        ESP_LOGE(TAG, "cannot start the time-named session, keeping %s open",
+                 s_base);
+        start_session();
+        return;
+    }
+
+    app_event_log(esp_timer_get_time(), SRC_SYS, EVT_SESSION_SYNC);
 }
 
 /* One mount attempt at a given SPI clock. */
@@ -628,47 +954,29 @@ out:
     return result;
 }
 
-static uint32_t scan_next_run_index(void)
-{
-    DIR *dir;
-
-    fs_lock();
-    dir = opendir(APP_LOG_MOUNT_POINT);
-    if (!dir) {
-        fs_unlock();
-        return 1;
-    }
-
-    uint32_t max = 0;
-    struct dirent *e;
-    while ((e = readdir(dir)) != NULL) {
-        unsigned idx;
-        if (strncmp(e->d_name, "imu_", 4) == 0 &&
-            sscanf(e->d_name, "%*[^_]_%u", &idx) == 1) {
-            if (idx > max) {
-                max = idx;
-            }
-        }
-    }
-    closedir(dir);
-    fs_unlock();
-
-    return max + 1;
-}
-
 /* ------------------------------------------------------------- write path */
 
 static void write_row(logger_file_t idx, const char *line)
 {
-    FILE *f = s_f[idx];
-    if (!f) {
-        return;
-    }
+    int n = -1;
+    bool have;
 
-    int n;
+    /*
+     * The pointer is read under the same lock that close_files() takes. The
+     * sleep path closes the files from another task, so reading s_f[idx]
+     * outside the lock would let an in-flight write land on an already-closed
+     * FILE.
+     */
     fs_lock();
-    n = fprintf(f, "%s\n", line);
+    have = (s_f[idx] != NULL) && !s_shutdown;
+    if (have) {
+        n = fprintf(s_f[idx], "%s\n", line);
+    }
     fs_unlock();
+
+    if (!have) {
+        return;                 /* no file open: nothing to record */
+    }
 
     if (n < 0) {
         s_consec_errors++;
@@ -754,21 +1062,24 @@ static void logger_recover(void)
         return;
     }
 
-    const uint32_t run = scan_next_run_index();
-    if (open_run_files(run) != ESP_OK) {
+    /*
+     * Reopen the session that was interrupted rather than starting a new one: a
+     * transient write error is not a reason to split a recording in two, and
+     * appending keeps whatever was already captured.
+     */
+    if (!start_session()) {
         fs_unlock();
         ESP_LOGE(TAG, "reopening files failed, continuing serial-only");
         return;
     }
 
     status_lock();
-    s_status.run_index = run;
     s_status.remounts++;
     status_unlock();
     fs_unlock();
 
     app_event_log(esp_timer_get_time(), SRC_SYS, EVT_SD_REMOUNT);
-    ESP_LOGW(TAG, "remounted, now logging to run %u", (unsigned)run);
+    ESP_LOGW(TAG, "remounted, continuing session %s", s_base);
 }
 
 /* ----------------------------------------------------------- queue draining */
@@ -780,8 +1091,9 @@ static void drain_imu(void)
         if (!s_logging) {
             continue;
         }
+        const log_ctx_t ctx = ctx_time(s.t_us);
         char line[APP_LOG_LINE_BYTES];
-        if (log_fmt_imu(line, sizeof(line), &s) > 0) {
+        if (log_fmt_imu(line, sizeof(line), &s, &ctx) > 0) {
             write_row(LOGGER_FILE_IMU, line);
         }
     }
@@ -794,8 +1106,9 @@ static void drain_mag(void)
         if (!s_logging) {
             continue;
         }
+        const log_ctx_t ctx = ctx_time(s.t_us);
         char line[APP_LOG_LINE_BYTES];
-        if (log_fmt_mag(line, sizeof(line), &s) > 0) {
+        if (log_fmt_mag(line, sizeof(line), &s, &ctx) > 0) {
             write_row(LOGGER_FILE_MAG, line);
         }
     }
@@ -805,11 +1118,22 @@ static void drain_gnss(void)
 {
     gnss_sample_t s;
     while (xQueueReceive(q_gnss, &s, 0) == pdTRUE) {
+        /*
+         * Take the time before formatting. The epoch that carries the first
+         * usable time is what opens the time-named session, and it has to land
+         * in the new file rather than the one being closed.
+         */
+        update_utc_anchor(&s);
+
         if (!s_logging) {
             continue;
         }
+
+        sync_to_gps_time(&s);
+
+        const log_ctx_t ctx = ctx_time(s.t_us);
         char line[APP_LOG_LINE_BYTES];
-        if (log_fmt_gnss(line, sizeof(line), &s) > 0) {
+        if (log_fmt_gnss(line, sizeof(line), &s, &ctx) > 0) {
             write_row(LOGGER_FILE_GNSS, line);
         }
     }
@@ -834,8 +1158,9 @@ static void drain_key(void)
         /* Event rows are always written, even while logging is paused, so the
          * start/stop bookkeeping itself is never lost. */
         const key_event_t row = { .t_us = e.t_us, .src = e.src, .event = out };
+        const log_ctx_t ctx = ctx_mark(row.t_us);
         char line[APP_LOG_LINE_BYTES];
-        if (log_fmt_event(line, sizeof(line), &row) > 0) {
+        if (log_fmt_event(line, sizeof(line), &row, &ctx) > 0) {
             write_row(LOGGER_FILE_EVENT, line);
         }
     }
@@ -870,6 +1195,18 @@ static void logger_task(void *arg)
         drain_gnss();
         drain_key();
 
+        /*
+         * Everything below opens, flushes or remounts the card. Once the sleep
+         * path has closed it, doing any of that would reopen the files and
+         * leave unflushed data behind when the chip powers down, so the task
+         * goes idle. The drains above stay, which keeps the producers from
+         * filling their queues while the board waits for the key release.
+         */
+        if (s_shutdown) {
+            vTaskDelay(poll_ticks ? poll_ticks : 1);
+            continue;
+        }
+
         const TickType_t now = xTaskGetTickCount();
         if ((int32_t)(now - next_flush) >= 0 ||
             s_pending_bytes >= APP_LOG_BATCH_FLUSH_BYTES) {
@@ -890,14 +1227,10 @@ static void logger_task(void *arg)
             mount_retries++;
 
             if (sd_mount(verbose) == ESP_OK) {
-                const uint32_t run = scan_next_run_index();
-                if (open_run_files(run) == ESP_OK) {
-                    status_lock();
-                    s_status.run_index = run;
-                    status_unlock();
+                if (start_session()) {
                     app_event_log(esp_timer_get_time(), SRC_SYS, EVT_SD_MOUNTED);
-                    ESP_LOGI(TAG, "TF card appeared, now logging to run %u",
-                             (unsigned)run);
+                    ESP_LOGI(TAG, "TF card appeared, recording into session %s",
+                             s_base);
                 }
             }
         }
@@ -927,11 +1260,13 @@ esp_err_t logger_init(void)
     } else {
         app_event_log(esp_timer_get_time(), SRC_SYS, EVT_SD_MOUNTED);
 
-        const uint32_t run = scan_next_run_index();
-        if (open_run_files(run) != ESP_OK) {
-            ESP_LOGE(TAG, "opening run files failed, serial-only");
-        } else {
-            s_status.run_index = run;
+        /*
+         * Recording starts here, with no key press required: the boot session
+         * is named nosync_NNNN until the receiver supplies a time, at which
+         * point it is replaced by one named after that time.
+         */
+        if (!start_session()) {
+            ESP_LOGE(TAG, "opening the session files failed, serial-only");
         }
     }
 

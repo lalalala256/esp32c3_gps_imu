@@ -99,6 +99,22 @@
 
 #define APP_SERIAL_MIRROR_DECIM     CONFIG_APP_SERIAL_MIRROR_DECIM
 
+/*
+ * Session base names are built from the GNSS time ("20261006_062222") or, while
+ * the receiver has no time yet, from an index ("nosync_0001"). 32 bytes covers
+ * either of those plus the suffix used to avoid a collision.
+ */
+#define APP_LOG_BASE_BYTES          32
+
+/*
+ * Earliest year a GNSS date is believed.
+ *
+ * A receiver that has not decoded the almanac yet can report an empty or
+ * nonsensical date, and restarting the recording into a file named after
+ * "1980-01-06" would be worse than waiting for a real one.
+ */
+#define APP_LOG_MIN_YEAR            2020
+
 /* ------------------------------------------------------------------ GNSS */
 #if CONFIG_APP_GNSS_UART_PORT == 0
 #define APP_GNSS_UART_PORT          UART_NUM_0
@@ -122,6 +138,24 @@
 /* ------------------------------------------------------------------ keys */
 #define APP_KEY_DEBOUNCE_MS         CONFIG_APP_KEY_DEBOUNCE_MS
 #define APP_KEY_POLL_MS             10
+
+/*
+ * Hold KEY1 this long and the board goes to sleep. A short press still toggles
+ * logging, so the two are told apart rather than both firing: the press event
+ * for KEY1 is emitted on release, once it is known which one it was.
+ */
+#define APP_KEY_LONGPRESS_MS        CONFIG_APP_KEY_LONGPRESS_MS
+
+/* ---------------------------------------------------------------- power */
+#define APP_PRIO_POWER              3
+#define APP_STACK_POWER             3072
+
+/*
+ * How long to wait for the key that asked for sleep to be released before
+ * arming the wake source anyway. A low-level trigger with the key still down
+ * would wake the board straight back up.
+ */
+#define APP_SLEEP_RELEASE_MS        5000
 
 /* --------------------------------------------------------------- status */
 #define APP_STATUS_PERIOD_S         CONFIG_APP_STATUS_PERIOD_S
@@ -179,3 +213,17 @@
  * single-core part (the HTTP server runs it in its own connection task).
  */
 #define APP_WEB_STREAM_PERIOD_MS    50
+
+/*
+ * Longest a single EventSource connection may stay open before the device ends
+ * it and lets the browser reconnect.
+ *
+ * A stream that never returns holds one of the browser's six connections per
+ * host - and one of the server's sockets - for as long as the tab exists. With
+ * two or three tabs open that is every connection there is, and the next
+ * request from any of them (a /files refresh, say) sits waiting for a
+ * connection that never comes free: the fetch never settles and the page shows
+ * its loading text forever. Ending the stream makes the connection borrowed
+ * instead of owned.
+ */
+#define APP_WEB_STREAM_MAX_S        20

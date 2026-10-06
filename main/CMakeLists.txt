@@ -1,0 +1,23 @@
+idf_component_register(
+    SRCS
+        "app_main.c"
+        "app_state.c"
+        "log_format.c"
+        "sensor_imu.c"
+        "sensor_mag.c"
+        "gnss_nmea.c"
+        "gnss_uart.c"
+        "pps_capture.c"
+        "keys.c"
+        "logger_sd.c"
+        "status.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        esp_driver_gpio
+        esp_driver_uart
+        esp_driver_spi
+        esp_driver_sdspi
+        sdmmc
+        fatfs
+        esp_timer
+)

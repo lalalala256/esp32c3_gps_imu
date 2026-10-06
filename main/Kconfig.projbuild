@@ -1,0 +1,189 @@
+menu "GPS/IMU acquisition"
+
+    config APP_SD_MOUNT_POINT
+        string "TF card mount point"
+        default "/sdcard"
+
+    config APP_LOG_TO_SD
+        bool "Write CSV logs to the TF card"
+        default y
+
+    config APP_LOG_SERIAL_MIRROR
+        bool "Mirror CSV log lines to the USB serial console"
+        default y
+
+    config APP_SERIAL_MIRROR_DECIM
+        int "Mirror only every Nth IMU and magnetometer line"
+        range 1 100
+        default 10
+        help
+            Full-rate mirroring of the 100 Hz IMU and magnetometer streams can
+            stall the logger behind the console. GNSS and event rows are always
+            mirrored in full; IMU/mag rows are decimated by this factor.
+
+    config APP_LOG_AUTOSTART
+        bool "Start logging automatically at boot"
+        default y
+
+    config APP_LOG_FLUSH_MS
+        int "Log flush interval (ms)"
+        range 100 60000
+        default 1000
+
+    config APP_SD_SPI_FREQ_KHZ
+        int "TF card SPI clock (kHz)"
+        range 400 20000
+        default 20000
+
+    config APP_STATUS_PERIOD_S
+        int "Periodic status line interval (s)"
+        range 1 120
+        default 5
+
+    config APP_KEY_DEBOUNCE_MS
+        int "Key debounce time (ms)"
+        range 5 500
+        default 30
+
+    config APP_I2C_FREQ_HZ
+        int "I2C bus clock (Hz)"
+        range 100000 1000000
+        default 400000
+        help
+            Applied to both sensors. The BMI160 driver defaults to 1 MHz and the
+            QMC5883L driver to 400 kHz; this project overrides both so the shared
+            bus runs at one predictable speed. 400 kHz is the QMC5883L maximum.
+
+    menu "BMI160 accelerometer + gyroscope"
+
+        choice APP_BMI160_I2C_ADDR
+            prompt "I2C address"
+            default APP_BMI160_I2C_ADDR_GND
+            config APP_BMI160_I2C_ADDR_GND
+                bool "0x68 (SDO tied to GND)"
+            config APP_BMI160_I2C_ADDR_VDD
+                bool "0x69 (SDO tied to VDDIO)"
+        endchoice
+
+        choice APP_BMI160_ACC_RANGE
+            prompt "Accelerometer full scale"
+            default APP_BMI160_ACC_RANGE_8G
+            config APP_BMI160_ACC_RANGE_2G
+                bool "+/- 2 g"
+            config APP_BMI160_ACC_RANGE_4G
+                bool "+/- 4 g"
+            config APP_BMI160_ACC_RANGE_8G
+                bool "+/- 8 g"
+            config APP_BMI160_ACC_RANGE_16G
+                bool "+/- 16 g"
+        endchoice
+
+        choice APP_BMI160_GYR_RANGE
+            prompt "Gyroscope full scale"
+            default APP_BMI160_GYR_RANGE_1000DPS
+            config APP_BMI160_GYR_RANGE_125DPS
+                bool "+/- 125 dps"
+            config APP_BMI160_GYR_RANGE_250DPS
+                bool "+/- 250 dps"
+            config APP_BMI160_GYR_RANGE_500DPS
+                bool "+/- 500 dps"
+            config APP_BMI160_GYR_RANGE_1000DPS
+                bool "+/- 1000 dps"
+            config APP_BMI160_GYR_RANGE_2000DPS
+                bool "+/- 2000 dps"
+        endchoice
+
+        config APP_BMI160_ODR_HZ
+            int "Output data rate for accelerometer and gyroscope (Hz)"
+            range 25 1600
+            default 100
+
+        choice APP_BMI160_ACC_AVG
+            prompt "Accelerometer averaging (low power) / filter bandwidth (normal)"
+            default APP_BMI160_ACC_AVG_2
+            config APP_BMI160_ACC_AVG_1
+                bool "1 sample"
+            config APP_BMI160_ACC_AVG_2
+                bool "2 samples"
+            config APP_BMI160_ACC_AVG_4
+                bool "4 samples"
+            config APP_BMI160_ACC_AVG_8
+                bool "8 samples"
+            config APP_BMI160_ACC_AVG_16
+                bool "16 samples"
+            config APP_BMI160_ACC_AVG_32
+                bool "32 samples"
+            config APP_BMI160_ACC_AVG_64
+                bool "64 samples"
+            config APP_BMI160_ACC_AVG_128
+                bool "128 samples"
+        endchoice
+
+        config APP_BMI160_USE_INT1
+            bool "Use BMI160 INT1 (GPIO0) data-ready interrupt"
+            default y
+
+    endmenu
+
+    menu "QMC5883L magnetometer"
+
+        config APP_MAG_RATE_HZ
+            int "Magnetometer polling rate (Hz)"
+            range 1 200
+            default 100
+
+        choice APP_QMC5883L_ODR
+            prompt "Output data rate"
+            default APP_QMC5883L_ODR_100
+            config APP_QMC5883L_ODR_10
+                bool "10 Hz"
+            config APP_QMC5883L_ODR_50
+                bool "50 Hz"
+            config APP_QMC5883L_ODR_100
+                bool "100 Hz"
+            config APP_QMC5883L_ODR_200
+                bool "200 Hz"
+        endchoice
+
+        choice APP_QMC5883L_OSR
+            prompt "Oversampling ratio"
+            default APP_QMC5883L_OSR_256
+            config APP_QMC5883L_OSR_64
+                bool "64"
+            config APP_QMC5883L_OSR_128
+                bool "128"
+            config APP_QMC5883L_OSR_256
+                bool "256"
+            config APP_QMC5883L_OSR_512
+                bool "512"
+        endchoice
+
+        choice APP_QMC5883L_RANGE
+            prompt "Field range"
+            default APP_QMC5883L_RANGE_2G
+            config APP_QMC5883L_RANGE_2G
+                bool "+/- 2 G"
+            config APP_QMC5883L_RANGE_8G
+                bool "+/- 8 G"
+        endchoice
+
+    endmenu
+
+    menu "GNSS (NMEA over UART)"
+
+        config APP_GNSS_BAUD
+            int "GNSS UART baud rate"
+            default 9600
+
+        config APP_GNSS_UART_PORT
+            int "GNSS UART peripheral (0 or 1)"
+            range 0 1
+            default 1
+
+        config APP_GNSS_RAW_DUMP
+            bool "Also record raw NMEA sentences to gnss.csv"
+            default n
+
+    endmenu
+
+endmenu

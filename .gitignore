@@ -1,0 +1,14 @@
+# ESP-IDF build output
+build/
+sdkconfig
+sdkconfig.old
+
+# Component Manager downloads (re-created by `idf.py build`)
+managed_components/
+
+# Editor / OS
+.vscode/
+.DS_Store
+
+# Host-side artefacts
+*.png

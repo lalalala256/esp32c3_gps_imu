@@ -1,0 +1,20 @@
+# Target: ESP32-C3 SuperMini
+CONFIG_IDF_TARGET="esp32c3"
+
+# ---------------------------------------------------------------------------
+# Console MUST go to the USB Serial/JTAG controller, NOT UART0.
+# GPIO20/21 are UART0's default pins and are wired to the GNSS module here.
+# ---------------------------------------------------------------------------
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# 1 kHz tick: gives 1 ms resolution for the 100 Hz IMU path and key debounce.
+CONFIG_FREERTOS_HZ=1000
+
+# GPIO8 (SDA) and GPIO9 (SCL) are ESP32-C3 strapping pins and must be HIGH at
+# boot. Enable the internal pull-ups as a safety net; the sensor breakout boards
+# still need their own pull-ups for reliable 400 kHz operation.
+CONFIG_I2CDEV_AUTO_ENABLE_PULLUPS=y
+
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096

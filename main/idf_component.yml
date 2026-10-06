@@ -1,0 +1,14 @@
+## IDF Component Manager manifest.
+## Dependencies listed here are fetched from components.espressif.com and are
+## automatically added to this component's requirements by the component manager.
+dependencies:
+  idf: ">=5.2"
+
+  # I2C bus abstraction shared by both sensors (single I2C_NUM_0 on GPIO8/9).
+  esp-idf-lib/i2cdev: "^2"
+
+  # BMI160 accelerometer + gyroscope, incl. INT1 "new data" interrupt support.
+  esp-idf-lib/bmi160: "^1.1.0"
+
+  # QMC5883L 3-axis magnetometer (milligauss output).
+  esp-idf-lib/qmc5883l: "^1.0.7"

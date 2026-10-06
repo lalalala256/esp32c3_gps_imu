@@ -147,7 +147,7 @@ GNSS 行额外给出绝对 UTC（`utc_date` / `utc_time`），用于把 `t_us` �
 
 | 项 | 值 |
 |---|---|
-| SSID | `esp32c3-supermini-gnss` |
+| SSID | `esp32c3-gnss` |
 | 密码 | `12345678`（WPA2-PSK） |
 | 信道 | 1（2.4 GHz；ESP32-C3 不支持 5 GHz） |
 | 发射功率 | 20 dBm（`APP_WIFI_TX_POWER_DBM`） |

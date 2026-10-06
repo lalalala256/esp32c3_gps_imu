@@ -237,7 +237,7 @@ menu "GPS/IMU acquisition"
 
         config APP_WIFI_SSID
             string "Access point SSID"
-            default "esp32c3-supermini-gnss"
+            default "esp32c3-gnss"
 
         config APP_WIFI_PASSWORD
             string "Access point password (8..63 chars, empty for an open AP)"
@@ -264,6 +264,38 @@ menu "GPS/IMU acquisition"
             int "Maximum simultaneous clients"
             range 1 8
             default 4
+
+        config APP_WIFI_SCAN_AT_BOOT
+            bool "Scan for nearby networks at boot (RF self-check)"
+            default n
+            help
+                Runs one scan right after the AP comes up and logs every network
+                it can see. A scan switches the radio away from the AP, so it is
+                off by default: while the AP bring-up itself is suspect, the
+                boot path is kept identical to the IDF SoftAP example, which
+                does not scan. Turn it on to check the receiver.
+
+        config APP_WIFI_STA_TEST
+            bool "Join an existing network at boot to test the transmitter"
+            default n
+            help
+                Receiving proves only the receiver; association is a two-way
+                exchange, so succeeding here proves the transmitter works too.
+                Point it at a phone hotspot, which needs no extra hardware.
+                The disconnect reason is logged, and it is the interesting part:
+                NO_AP_FOUND means nothing heard our probes (transmit side broken)
+                while AUTH_FAIL means the far end answered and only the password
+                is wrong (transmit side fine).
+
+        config APP_WIFI_STA_SSID
+            string "STA test: SSID to join"
+            default ""
+            depends on APP_WIFI_STA_TEST
+
+        config APP_WIFI_STA_PASSWORD
+            string "STA test: password"
+            default ""
+            depends on APP_WIFI_STA_TEST
 
         config APP_WEB_PORT
             int "HTTP port"

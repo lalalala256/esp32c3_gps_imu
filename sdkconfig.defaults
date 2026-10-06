@@ -38,3 +38,26 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # ---------------------------------------------------------------------------
 CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=64
+
+# ---------------------------------------------------------------------------
+# These are set here as well as in Kconfig.projbuild on purpose.
+#
+# A Kconfig `default` only applies when sdkconfig is first created: editing it
+# afterwards changes nothing, and the value that actually compiles stays in
+# sdkconfig. That has already caused three wrong conclusions in this project
+# (the WiFi SSID, CONFIG_FATFS_LFN, and APP_WIFI_SCAN_AT_BOOT), so keep the
+# values that matter in both places.
+# ---------------------------------------------------------------------------
+CONFIG_APP_WIFI_SSID="esp32c3-gnss"
+
+# ---------------------------------------------------------------------------
+# Force a full RF calibration at boot.
+#
+# The partial calibration that is the default reuses calibration data stored in
+# NVS. If that data is stale or corrupt the radio can still receive perfectly
+# while transmitting at a negligible level, and nothing in software shows it:
+# esp_wifi_get_max_tx_power() reports the requested value either way. Erasing the
+# flash clears the stored data; this option guarantees it is regenerated.
+# Costs roughly a second of boot time, worth it until the transmitter is proven.
+# ---------------------------------------------------------------------------
+CONFIG_ESP_PHY_RF_CAL_FULL=y

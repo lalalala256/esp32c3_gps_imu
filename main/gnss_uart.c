@@ -269,16 +269,13 @@ static void gnss_task(void *arg)
                          APP_GNSS_UART_PORT, APP_GNSS_REPORT_MS, PIN_GNSS_UART_RX,
                          APP_GNSS_BAUD);
             } else {
-                ESP_LOGW(TAG, "rx=%u bytes, %u lines, %u sentences parsed in %d ms",
+                ESP_LOGD(TAG, "rx=%u bytes, %u lines, %u sentences parsed in %d ms",
                          (unsigned)s_rx_window, (unsigned)s_lines_window,
                          (unsigned)s_sent_window, APP_GNSS_REPORT_MS);
                 if (s_have_rmc) {
-                    ESP_LOGW(TAG, "  RMC: %s", s_rmc);
-                } else {
-                    ESP_LOGW(TAG, "  no RMC sentence seen in this window; only RMC produces "
-                             "a UTC epoch");
+                    ESP_LOGD(TAG, "  RMC: %s", s_rmc);
                 }
-                ESP_LOGW(TAG, "  parser: fix=%u mode=%u sats_used=%u sats_view=%u hdop=%.1f "
+                ESP_LOGD(TAG, "  parser: fix=%u mode=%u sats_used=%u sats_view=%u hdop=%.1f "
                          "utc=%d pos=%d",
                          (unsigned)st.fix_type, (unsigned)st.fix_mode,
                          (unsigned)st.sats_used, (unsigned)st.sats_view,
